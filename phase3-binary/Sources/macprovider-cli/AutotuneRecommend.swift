@@ -231,6 +231,73 @@ extension AutotuneRecommendHardware {
         return min(hardwareCap, modelCap, draftCap ?? .max)
     }
 
+    /// The uncalibrated serve context for a recommendation on this hardware
+    /// (SPEC-023-R018 item 9). Tier 1 without a draft model follows the paged
+    /// serve plan so Inkling emits its honest two-row paged context for plain
+    /// recommendations, `--calibrate-concurrency`, and `--calibrate-context`
+    /// bounds alike; higher tiers and draft-pinned configs keep
+    /// `recommendedMaxContext`. Both the recommend writer and
+    /// `models adopt-recommendation` call this single function.
+    func recommendedServeContext(
+        modelID: String,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        verifiedArtifactSizeBytes: Int? = nil,
+        catalogMinRAMGB: Int,
+        draftModel: String?
+    ) -> Int {
+        let baseContext = recommendedMaxContext(
+            modelID: modelID,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes,
+            catalogMinRAMGB: catalogMinRAMGB,
+            draftModel: draftModel
+        )
+        let hasDraft = ProviderCapacity.draftModelContextLimit(
+            physicalMemoryGB: memoryGB,
+            draftModel: draftModel
+        ) != nil
+        guard !hasDraft, recommendedMaxBatch <= 1 else {
+            return baseContext
+        }
+        let fullFit = verifiedConfigJSONData.flatMap { data in
+            verifiedConfigSHA256.flatMap { sha in
+                AutotuneModelContextCap.memoryFitBatchDepth(
+                    configData: data,
+                    verifiedConfigSHA256: sha,
+                    hardwareMemoryGB: memoryGB,
+                    catalogMinRAMGB: catalogMinRAMGB,
+                    calibrationContextTokens: baseContext,
+                    verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+                )
+            }
+        }
+        let pagedFit = verifiedConfigJSONData.flatMap { data in
+            verifiedConfigSHA256.flatMap { sha in
+                AutotuneModelContextCap.pagedFitBatchDepth(
+                    configData: data,
+                    verifiedConfigSHA256: sha,
+                    hardwareMemoryGB: memoryGB,
+                    catalogMinRAMGB: catalogMinRAMGB,
+                    contextTokens: baseContext,
+                    verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+                )
+            }
+        }
+        return AutotuneModelContextCap.pagedServePlan(
+            context: baseContext,
+            tierConstant: recommendedMaxBatch,
+            fullContextFit: fullFit,
+            pagedFit: pagedFit,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: memoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        ).context
+    }
+
     var recommendedMaxBatch: Int {
         let normalizedChip = chip.lowercased()
         if normalizedChip.contains("ultra") {
@@ -249,6 +316,20 @@ extension AutotuneRecommendHardware {
             return 2
         }
         return 1
+    }
+
+    /// The blind chip/RAM tier constant, with no memory-fit term.
+    static func tierBatch(chip: String, memoryGB: Int) -> Int {
+        AutotuneRecommendHardware(
+            machine: nil,
+            chip: chip,
+            memoryGB: memoryGB,
+            bandwidthTier: BandwidthTier.derive(chip: chip),
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxBatch
     }
 }
 
@@ -408,6 +489,65 @@ enum AutotuneModelContextCap {
         return max(1, Int(min(slots, UInt64(Int.max))))
     }
 
+    /// Largest slot count at which one row may hold `contextTokens` and every
+    /// other row holds `minimumServeContext`, plus fixed window state once per
+    /// row. Rows are paged, so the planner does not reserve a full context for
+    /// every row. Nil when the geometry cannot be read. One when even a single
+    /// full row does not fit: the context was already sized for that row.
+    static func pagedFitBatchDepth(
+        configData: Data,
+        verifiedConfigSHA256: String,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        contextTokens: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> Int? {
+        guard contextTokens >= 1,
+              Data(SHA256.hash(data: configData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(configData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
+        else {
+            return nil
+        }
+        let fixedBytes = recurrentStateBytesPerSequence(in: root)
+        let budget = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+        guard let one = pagedReservationBytes(
+            context: contextTokens,
+            slots: 1,
+            bytesPerToken: bytesPerToken,
+            fixedBytesPerRow: fixedBytes
+        ) else {
+            return nil
+        }
+        if one > budget {
+            return 1
+        }
+        let limit = ProviderCapacity.maxConcurrencyOverrideLimit
+        var low = 1
+        var high = limit
+        var best = 1
+        while low <= high {
+            let middle = low + (high - low) / 2
+            guard let cost = pagedReservationBytes(
+                context: contextTokens,
+                slots: middle,
+                bytesPerToken: bytesPerToken,
+                fixedBytesPerRow: fixedBytes
+            ), cost <= budget else {
+                high = middle - 1
+                continue
+            }
+            best = middle
+            low = middle + 1
+        }
+        return best
+    }
+
     /// SPEC-023-R018 item 9: a generated slot count lowered so that many
     /// full-context KV caches at `context` fit the `memoryFitBatchDepth`
     /// envelope. Unknown geometry leaves `slots` unchanged; callers pass a
@@ -518,6 +658,373 @@ enum AutotuneModelContextCap {
             catalogMinRAMGB: catalogMinRAMGB,
             verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
         ))
+    }
+
+    /// Slot count served for this Mac. The baseline is the full-context memory
+    /// fit, or the chip/RAM tier constant when that fit is unknown. The paged
+    /// reservation may only raise the count. A positive policy ceiling only
+    /// caps. `withheld` (a rollout-off revocation of this build) forces 1.
+    /// Unknown geometry (`fullContextFit` and `pagedFit` both nil) keeps the
+    /// tier constant.
+    static func plannedRowCount(
+        tierConstant: Int,
+        pagedFit: Int?,
+        fullContextFit: Int? = nil,
+        policyCeiling: Int? = nil,
+        withheld: Bool = false
+    ) -> Int {
+        if withheld {
+            return 1
+        }
+        let limit = ProviderCapacity.maxConcurrencyOverrideLimit
+        let baseline = min(limit, max(1, fullContextFit ?? tierConstant))
+        let paged = pagedFit.map { min(limit, max(1, $0)) } ?? baseline
+        let raised = max(baseline, paged)
+        let capped = (policyCeiling ?? 0) > 0 ? min(raised, policyCeiling ?? raised) : raised
+        return max(1, min(capped, limit))
+    }
+
+    /// The served pair when rows are paged: one row at `context`, every other
+    /// row at `minimumServeContext`, plus fixed window bytes per row. The
+    /// context gives way only when that reservation does not fit, never below
+    /// `minimumServeContext`; then the slot count comes down. Unknown geometry
+    /// leaves the pair unchanged.
+    static func pagedBoundedServePair(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> (context: Int, slots: Int) {
+        let requested = max(1, slots)
+        // A one-row plan keeps the caller's context. Shrinking it by the
+        // 4,000-token floor made every 1-row Mac shorter than main.
+        if requested < 2 {
+            return (context, 1)
+        }
+        guard let verifiedConfigJSONData,
+              let verifiedConfigSHA256,
+              Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(verifiedConfigJSONData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
+        else {
+            return (context, requested)
+        }
+        let fixedBytes = recurrentStateBytesPerSequence(in: root)
+        let budget = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+        func fits(_ candidateContext: Int, _ candidateSlots: Int) -> Bool {
+            guard candidateContext >= 1, candidateSlots >= 1,
+                  let cost = pagedReservationBytes(
+                    context: candidateContext,
+                    slots: candidateSlots,
+                    bytesPerToken: bytesPerToken,
+                    fixedBytesPerRow: fixedBytes
+                  )
+            else {
+                return false
+            }
+            return cost <= budget
+        }
+        if fits(context, requested) {
+            return (context, requested)
+        }
+        let floorContext = min(max(context, 1), minimumServeContext)
+        if context > minimumServeContext, fits(minimumServeContext, requested) {
+            var low = minimumServeContext
+            var high = context
+            while high - low > 1 {
+                let middle = low + (high - low) / 2
+                if fits(middle, requested) {
+                    low = middle
+                } else {
+                    high = middle
+                }
+            }
+            return (low, requested)
+        }
+        var best = 1
+        var low = 1
+        var high = requested
+        while low <= high {
+            let middle = low + (high - low) / 2
+            if fits(floorContext, middle) {
+                best = middle
+                low = middle + 1
+            } else {
+                high = middle - 1
+            }
+        }
+        // Dropping to one row must not keep the shortened floor context.
+        if best < 2 {
+            return (context, 1)
+        }
+        return (floorContext, best)
+    }
+
+    /// The pair `serve` runs after `plannedRowCount`. Two or more rows may
+    /// lower the context until that reservation fits. One row keeps
+    /// `context`, except an Inkling continuous-batching cache: it stores
+    /// every visit's full history, so a context one row cannot hold becomes
+    /// the largest context at which two rows fit, or one honest row when
+    /// two do not. A revocation and a policy ceiling of 1 stay at one row.
+    static func pagedServePlan(
+        context: Int,
+        tierConstant: Int,
+        fullContextFit: Int?,
+        pagedFit: Int?,
+        policyCeiling: Int? = nil,
+        withheld: Bool = false,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> (context: Int, slots: Int) {
+        let planned = plannedRowCount(
+            tierConstant: tierConstant,
+            pagedFit: pagedFit,
+            fullContextFit: fullContextFit,
+            policyCeiling: policyCeiling,
+            withheld: withheld
+        )
+        return pagedServedContext(
+            context: context,
+            slots: planned,
+            allowInklingRaise: !withheld && policyCeiling != 1,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+    }
+
+    /// Context for a row count that is already decided (policy ceiling and
+    /// the M1/M2 cap included). `allowInklingRaise` searches a shorter
+    /// Inkling context that fits two continuous-batching rows when `slots`
+    /// is 1.
+    static func pagedServedContext(
+        context: Int,
+        slots: Int,
+        allowInklingRaise: Bool = false,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int? = nil
+    ) -> (context: Int, slots: Int) {
+        let requested = max(1, slots)
+        if requested >= 2 {
+            let bounded = pagedBoundedServePair(
+                context: context,
+                slots: requested,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+            )
+            if bounded.slots >= 2 {
+                return bounded
+            }
+            return honestSingleRowContext(
+                context: context,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+            )
+        }
+        if allowInklingRaise, isInklingPagedLayout(verifiedConfigJSONData, verifiedConfigSHA256: verifiedConfigSHA256) {
+            let raised = pagedBoundedServePair(
+                context: context,
+                slots: 2,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+            )
+            if raised.slots >= 2 {
+                return raised
+            }
+        }
+        return honestSingleRowContext(
+            context: context,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+    }
+
+    /// Tokens the paged pool must cover for the rows the planner promises:
+    /// one row at `contextTokens`, every other row at the 4,000-token floor.
+    static func pagedPoolTokens(contextTokens: Int, rows: Int) -> Int {
+        let context = max(0, contextTokens)
+        guard rows > 1 else { return context }
+        let floor = min(context, minimumServeContext)
+        let (extra, extraOverflow) = floor.multipliedReportingOverflow(by: rows - 1)
+        let (total, totalOverflow) = context.addingReportingOverflow(extraOverflow ? Int.max : extra)
+        if extraOverflow || totalOverflow { return Int.max }
+        return total
+    }
+
+    private static func honestSingleRowContext(
+        context: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int?
+    ) -> (context: Int, slots: Int) {
+        guard isInklingPagedLayout(verifiedConfigJSONData, verifiedConfigSHA256: verifiedConfigSHA256),
+              !pagedReservationFits(
+                context: context,
+                slots: 1,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+              )
+        else {
+            return (context, 1)
+        }
+        if let honest = largestFittingPagedContext(
+            context: context,
+            slots: 1,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        ) {
+            return (honest, 1)
+        }
+        return (min(max(context, 1), minimumServeContext), 1)
+    }
+
+    private static func isInklingPagedLayout(_ data: Data?, verifiedConfigSHA256: String?) -> Bool {
+        guard let data, let verifiedConfigSHA256,
+              Data(SHA256.hash(data: data)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(data),
+              PagedKVInkling2Layout(config: root) != nil,
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
+        else { return false }
+        return true
+    }
+
+    private static func pagedReservationFits(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int?
+    ) -> Bool {
+        guard context >= 1, slots >= 1,
+              let verifiedConfigJSONData, let verifiedConfigSHA256,
+              Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
+              let root = strictConfigRoot(verifiedConfigJSONData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0,
+              let cost = pagedReservationBytes(
+                context: context,
+                slots: slots,
+                bytesPerToken: bytesPerToken,
+                fixedBytesPerRow: recurrentStateBytesPerSequence(in: root)
+              )
+        else { return false }
+        let budget = usableKVBytes(
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+        )
+        return cost <= budget
+    }
+
+    /// Largest context at or below `context`, and at least the 4,000-token
+    /// floor, where `slots` paged rows fit. Nil when they do not fit at the floor.
+    private static func largestFittingPagedContext(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        verifiedArtifactSizeBytes: Int?
+    ) -> Int? {
+        func fits(_ candidate: Int) -> Bool {
+            pagedReservationFits(
+                context: candidate,
+                slots: slots,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB,
+                verifiedArtifactSizeBytes: verifiedArtifactSizeBytes
+            )
+        }
+        if fits(context) { return context }
+        let floor = min(max(context, 1), minimumServeContext)
+        guard context > floor, fits(floor) else { return fits(floor) ? floor : nil }
+        var low = floor
+        var high = context
+        while high - low > 1 {
+            let middle = low + (high - low) / 2
+            if fits(middle) { low = middle } else { high = middle }
+        }
+        return low
+    }
+
+    /// Bytes for one full context plus `slots - 1` rows at the 4,000-token
+    /// floor, and the fixed window cost on every row.
+    private static func pagedReservationBytes(
+        context: Int,
+        slots: Int,
+        bytesPerToken: Int,
+        fixedBytesPerRow: Int
+    ) -> UInt64? {
+        guard slots >= 1, context >= 1, bytesPerToken > 0, fixedBytesPerRow >= 0 else {
+            return nil
+        }
+        let floorTokens = min(context, minimumServeContext)
+        guard let full = checkedProduct([UInt64(bytesPerToken), UInt64(context)]),
+              let eachFloor = checkedProduct([UInt64(bytesPerToken), UInt64(floorTokens)])
+        else {
+            return nil
+        }
+        let others: UInt64
+        if slots == 1 {
+            others = 0
+        } else if let product = checkedProduct([UInt64(slots - 1), eachFloor]) {
+            others = product
+        } else {
+            return nil
+        }
+        let tokenBytes = full.addingReportingOverflow(others)
+        guard !tokenBytes.overflow,
+              let fixedAll = checkedProduct([UInt64(slots), UInt64(fixedBytesPerRow)])
+        else {
+            return nil
+        }
+        let total = tokenBytes.partialValue.addingReportingOverflow(fixedAll)
+        guard !total.overflow else {
+            return nil
+        }
+        return total.partialValue
     }
 
     /// SPEC-051-R006: the SPEC-023 KV envelope of one shard stage, the same 3/4 of
@@ -664,6 +1171,14 @@ enum AutotuneModelContextCap {
     }
 
     private static func recurrentStateBytesPerSequence(in root: [String: Any]) -> Int {
+        // Inkling continuous batching stores every visit's full history, so
+        // this fixed term is 0. The serial rotating cache prices its windows
+        // separately and must not size a continuous-batching row. A layout
+        // whose head geometry is unreadable contributes nothing here; the
+        // per-token term is then unreadable too, so the memory fit stays unknown.
+        if let pricing = inklingKVPricing(in: root) {
+            return pricing.fixed
+        }
         let text = root["text_config"] as? [String: Any] ?? root
         guard let linear = text["linear_attn_config"] as? [String: Any],
               let heads = firstInt(in: linear, paths: [["num_heads"]]),
@@ -725,7 +1240,94 @@ enum AutotuneModelContextCap {
         return Int(bytes)
     }
 
+    /// Inkling 2 (`PagedKVInkling2Layout`) as continuous batching stores it:
+    /// every visit, paged-attention and sliding-window, keeps full history.
+    /// Nil when the config is not that layout, or when it is but the head
+    /// geometry cannot be read. Slot planning must not fall through to
+    /// counting every declared layer as full attention.
+    private static func inklingKVPricing(in root: [String: Any]) -> (perToken: Int, fixed: Int)? {
+        inklingKVPricing(in: root, storage: .pagedFullHistory)
+    }
+
+    /// The serial `RotatingKVCache` price: global visits grow, each sliding
+    /// visit is one fixed window. Not a continuous-batching row size.
+    static func inklingSerialRotatingKVPricing(configData: Data) -> (perToken: Int, fixed: Int)? {
+        strictConfigRoot(configData).flatMap { inklingKVPricing(in: $0, storage: .serialRotatingWindow) }
+    }
+
+    private enum InklingKVStorage {
+        case pagedFullHistory
+        case serialRotatingWindow
+    }
+
+    private static func inklingKVPricing(
+        in root: [String: Any],
+        storage: InklingKVStorage
+    ) -> (perToken: Int, fixed: Int)? {
+        guard let layout = PagedKVInkling2Layout(config: root),
+              let perVisit = attentionKVBytesPerVisit(in: root)
+        else { return nil }
+        var visits = 0
+        var fixed: UInt64 = 0
+        for kind in layout.expectedCacheKinds {
+            switch kind {
+            case .pagedAttention:
+                visits += 1
+            case .slidingWindow(let windowTokens):
+                switch storage {
+                case .pagedFullHistory:
+                    visits += 1
+                case .serialRotatingWindow:
+                    guard let windowBytes = checkedProduct([UInt64(windowTokens), UInt64(perVisit)]) else { return nil }
+                    let sum = fixed.addingReportingOverflow(windowBytes)
+                    guard !sum.overflow else { return nil }
+                    fixed = sum.partialValue
+                }
+            case .recurrentMamba, .pagedMLA, .deepseekV4Pool, .pagedIndexedKV, .pagedQwen4ExpKV:
+                break
+            }
+        }
+        guard let growth = checkedProduct([UInt64(visits), UInt64(perVisit)]),
+              growth <= UInt64(Int.max),
+              fixed <= UInt64(Int.max)
+        else { return nil }
+        return (Int(growth), Int(fixed))
+    }
+
+    /// Bytes of one full-attention visit for one token: `kv_heads × head_dim × 2 × 2`.
+    /// The same head geometry `kvCacheBytesPerToken` uses for every other family.
+    private static func attentionKVBytesPerVisit(in root: [String: Any]) -> Int? {
+        guard let hiddenSize = firstInt(in: root, paths: [
+                ["hidden_size"], ["n_embd"], ["d_model"],
+                ["text_config", "hidden_size"], ["text_config", "n_embd"], ["text_config", "d_model"]
+            ]),
+            let attentionHeads = firstInt(in: root, paths: [
+                ["num_attention_heads"], ["n_head"],
+                ["text_config", "num_attention_heads"], ["text_config", "n_head"]
+            ])
+        else { return nil }
+        let kvHeads = firstInt(in: root, paths: [
+            ["num_key_value_heads"], ["n_kv_head"],
+            ["text_config", "num_key_value_heads"], ["text_config", "n_kv_head"]
+        ]) ?? attentionHeads
+        let declaredHeadDim = firstInt(in: root, paths: [["head_dim"], ["text_config", "head_dim"]])
+        guard hiddenSize > 0, attentionHeads > 0, kvHeads > 0,
+              declaredHeadDim != nil || hiddenSize % attentionHeads == 0
+        else { return nil }
+        let headDim = declaredHeadDim ?? (hiddenSize / attentionHeads)
+        guard headDim > 0,
+              let bytes = checkedProduct([
+                  UInt64(kvHeads), UInt64(headDim), 2, UInt64(bytesPerKVElement)
+              ]),
+              bytes > 0, bytes <= UInt64(Int.max)
+        else { return nil }
+        return Int(bytes)
+    }
+
     private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
+        if PagedKVInkling2Layout(config: root) != nil {
+            return inklingKVPricing(in: root)?.perToken
+        }
         if let kvLoraRank = firstInt(in: root, paths: [["kv_lora_rank"], ["text_config", "kv_lora_rank"]]) {
             return latentKVCacheBytesPerToken(in: root, kvLoraRank: kvLoraRank)
         }

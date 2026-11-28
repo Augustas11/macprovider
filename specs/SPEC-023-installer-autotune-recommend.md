@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.47
+version: v0.22.50
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,45 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.50 (2026-11-27, Related: #2530)** — SPEC-023-R018 items 5 and 9,
+  SPEC-023-R009 automatic application, and AC-44: on the continuous-batching
+  path, `PagedKVCache` stores every Inkling visit (paged-attention and
+  sliding-window) as full history (`visits × kv_heads × head_dim × 2 × 2`,
+  fixed window bytes 0; convolution tails unpriced). Serial `RotatingKVCache`
+  keeps the fixed-window price via `inklingSerialRotatingKVPricing` and MUST
+  NOT size a continuous-batching row; unreadable head geometry stays unknown.
+  `serve` sizes the scheduler at the larger of the full-context fit (or the
+  chip/RAM tier constant when unknown) and the paged fit, capped at 5 on
+  Apple M1/M2 GPUs other than Ultra, a positive signed `max_served_slots`, and
+  `max_concurrency_override_limit` (32): the paged plan only raises and never
+  serves fewer rows than the full-context fit. A 1-row result keeps the
+  incoming context, except an Inkling continuous-batching row whose honest
+  full-history cost exceeds the KV budget, which is served at the largest
+  context fitting two paged-reservation rows (or one honest row when two do
+  not, or when withheld or capped at 1). Rollout-off revocation withholds one
+  row only when model SHA-256, Metal library SHA-256, and kernel identifier
+  all match (a missing digest does not withhold). Tier-1 `autotune --recommend`
+  without a draft model uses that same paged-plan context across plain
+  recommend, `--calibrate-concurrency`, and the `--calibrate-context` upper
+  bound (raising slots to the paged plan only when no concurrency calibration
+  override is set, and without a policy cap), and `models adopt-recommendation`
+  validates context authority against that same rule. An owner-pinned warm switch
+  keeps the pin and the full-context bound (forced to 1 slot on a running-build
+  revocation).
+- **v0.22.49 (2026-11-27, Related: #2530)** — SPEC-023-R018 item 9 and
+  SPEC-023-R009 automatic application: a chip/RAM tier constant of 1 may rise
+  to the paged row count. One row reserves the emitted context. Each other
+  row reserves 4,000 tokens plus the fixed window bytes. A tier above 1 is
+  still only lowered by the full-context fit. A positive `max_served_slots`
+  only caps, and that cap is applied by `serve`. `autotune --recommend` does
+  not load the continuous-batching policy, so the count it emits is not capped
+  by `max_served_slots`. A calibration override is not raised. `serve` uses
+  the planned count and lowers a generated context only when that reservation
+  does not fit.
+- **v0.22.48 (2026-11-27, Related: #2530)** — SPEC-023-R018 item 5: an
+  `inkling2_loop` config prices KV from `PagedKVInkling2Layout`. Growth is
+  the global paged-attention visits only. Each sliding-window visit is a
+  fixed per-row cost of its window, charged before the per-token division.
 - **v0.22.47 (2026-11-26)** — §9.4 `SPEC-023-R029`: a probe's TTFT ends at
   the first streamed delta of either channel, `content` or
   `reasoning_content` (step 4). A reasoning model that spent the whole probe
@@ -3161,9 +3200,9 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
 7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, minimum aggregate-gain fraction, calibration context, probe prompt tokens, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements (aggregate tokens/sec, per-stream p95 TTFT, informational median per-stream decode rate, pass/fail and reason), and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied served depth MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged. A served depth above 8 MUST be written as `max_concurrency_override: 8` plus `max_concurrency_depth_override: <depth>` (v0.22.18), because pre-#1906 CLIs reject `max_concurrency_override` above 8 at startup and ignore unknown keys; an apply at 8 or below MUST remove `max_concurrency_depth_override`. The v2 record MUST also carry `ttft_regression_factor` fixed at 1.5 after `ttft_ceiling_ms` so a pre-v2 decoder can still load stored state; it gates nothing. Served slots above the coordinator's `pool.max_concurrency_ceiling` (default 8) are clamped there, so a deeper calibrated depth routes only after an operator raises that ceiling.
 
-**Automatic application (v0.22.24).** The applied `max_concurrency_override` is a recommendation, not an owner setting. Ownership is the config key `max_concurrency_source` (`owner` | `autotune`); a config without it is autotune-derived, and a value from `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` or `--max-batch` is an owner value. An apply MUST remove `max_concurrency_source`, and an unknown value MUST fail config load. An owner value is served as written. For an autotune-derived value, `serve` MUST serve 1 with a draft model configured (SPEC-028 FR-4) or the CB emergency off set; otherwise it MUST size the scheduler at the step-1 bound for this Mac (`memory_fit_cap` at the served context, else the tier constant), capped at 5 on Apple M1/M2 GPUs other than Ultra and at `max_concurrency_override_limit`, and serve the slot count the SPEC-038 FR-CB10 on-device self-check grants (1 until it decides, unless a signed positive policy entry gives a provisional grant at the configured count). It MUST NOT exceed `memory_fit_cap` when that is computable. The self-check result applies live and is stored per model, Metal library, kernel, hardware class and macOS build.
+**Automatic application (v0.22.50).** The applied `max_concurrency_override` is a recommendation, not an owner setting. Ownership is the config key `max_concurrency_source` (`owner` | `autotune`); a config without it is autotune-derived, and a value from `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` or `--max-batch` is an owner value. An apply MUST remove `max_concurrency_source`, and an unknown value MUST fail config load. An owner value is served as written (bounded by the physical memory cap and signed policy ceiling). For an autotune-derived value, `serve` MUST serve 1 with a draft model configured (SPEC-028 FR-4), the CB emergency off set, or a rollout-off revocation whose model SHA-256, Metal library SHA-256, and kernel identifier all match the running build (a missing digest does not withhold); otherwise it MUST size the scheduler at the item 9 planned row count for this Mac — `max(full-context fit or tier constant when unknown, paged fit)` — capped at 5 on Apple M1/M2 GPUs other than Ultra, at a positive signed `max_served_slots`, and at `max_concurrency_override_limit` (32). The paged fit MAY only raise the count and MUST NOT lower any tier below its full-context fit. A 1-row result keeps the served context, except an Inkling continuous-batching row whose honest full-history cost exceeds the KV budget, which is served at the largest context where two paged-reservation rows fit (or one honest row when two do not, or when withheld, draft-pinned, emergency-off, or capped at 1). It serves the slot count the SPEC-038 FR-CB10 on-device self-check grants (1 until it decides, unless a signed positive policy entry gives a provisional grant at the configured count). The self-check result applies live and is stored per model, Metal library, kernel, hardware class and macOS build.
 
-Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
+Without `--calibrate-concurrency`, output shape MUST remain unchanged: the §6 `concurrency_calibration` field is absent. When the tier constant is above 1, that constant emits and is lowered only by the full-context term of `SPEC-023-R018` item 9. When the tier constant is 1 without a draft model, `autotune --recommend` uses the item 9 paged-plan context whenever no context calibration override is set — across plain recommend, `--calibrate-concurrency`, and the `--calibrate-context` upper bound — and, when no concurrency calibration override is set, emits the item 9 paged-plan slot count as well. That command does not load the continuous-batching policy, so the emitted count is not capped by `max_served_slots`; `serve` applies that cap (automatic application above). Unknown geometry keeps the tier constant and context. A concurrency calibration override and a draft pin are not raised by the paged fit (v0.22.50). `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 
 Automatic installer use of this requirement is not authorized by v0.13.0. It remains pending signed physical-hardware evidence (including a `JOURNEY-PROVIDER-PREBETA-ADMISSION`-class result on a representative multi-slot box, such as the live 256 GB M3 Ultra) and an owner decision under issue #1589. The pre-existing default path — the tier constant — is unchanged and remains the fleet default until that evidence and decision land.
 
@@ -3194,7 +3233,19 @@ model maximum, memory-safe context, draft cap)`, where:
 5. When the config declares `layer_types` for every layer, `layers` counts only
    the `full_attention` entries. A complete stack with no `full_attention`
    entry has `kv_bytes_per_token = 0`: the memory-safe term binds nothing and
-   drops out of the minimum, like an unknown bound.
+   drops out of the minimum, like an unknown bound. An `inkling2_loop` config
+   that builds `PagedKVInkling2Layout` does not use `num_hidden_layers` as
+   `layers`. On the continuous-batching path `PagedKVCache` keeps full history
+   for every attention visit — both global paged-attention visits and
+   sliding-window visits (48 visits for Inkling 2 Mini) — so growth is
+   `visits × kv_heads × head_dim × 2 × 2` bytes per token and fixed sliding
+   window bytes are 0. Convolution tails are not priced. The serial
+   `RotatingKVCache` keeps the fixed-window price (global visits growing and
+   each sliding visit fixed at `sliding_window_size × kv_heads × head_dim × 2
+   × 2`) via `inklingSerialRotatingKVPricing` and MUST NOT be used to size a
+   continuous-batching row. Head geometry that cannot be read makes the whole
+   memory term unknown; the planner MUST NOT count every declared layer as
+   full attention, raise the row count, or clamp the context.
 6. An unknown bound (no declared maximum, unverified or duplicated config bytes,
    unreadable or overflowing geometry) drops out of the minimum. The
    4,000-token floor is emitted only when the memory-safe term itself is 4,000;
@@ -3213,47 +3264,85 @@ model maximum, memory-safe context, draft cap)`, where:
    `models adopt-recommendation` context check, SPEC-001 FR-20b
    `provider context set` and the warm-switch recompute) applies the same term.
 9. The context and slot count are bounded jointly. The context above is sized
-   for ONE full-context KV cache, so `serve_config.max_concurrency_override`
-   MUST be `max(1, min(slots, memory_fit_cap))`, where `slots` is the chip/RAM
-   tier constant (§9.2), the calibrated depth, or 1 with a draft model, and
-   `memory_fit_cap` is the R009 `memoryFitBatchDepth` at the emitted context:
-   `floor(usable_kv_bytes / (kv_bytes_per_token × context))`, the same
-   `usable_kv_bytes` as item 3, from the same verified `config.json`. The
-   context is never lowered to make room for slots on this path. When the
-   memory fit is unknown (item 6, or `kv_bytes_per_token = 0`), the slot count
-   stays at most the tier constant. Every path that writes or validates a
-   generated pair uses this same function:
+   for ONE full-context KV cache. For `autotune --recommend`, a tier constant
+   above 1, a concurrency calibration override, and a draft pin (1 slot) MUST
+   be `max(1, min(slots, memory_fit_cap))`, where `memory_fit_cap` is the R009
+   `memoryFitBatchDepth` at the emitted context: `floor(usable_kv_bytes /
+   (kv_bytes_per_token × context + fixed recurrent bytes))`, the same
+   `usable_kv_bytes` as item 3, from the same verified `config.json`. That
+   path never lowers the context to make room for slots. When the tier
+   constant is 1 and no draft model is configured, the uncalibrated serve
+   context (used by plain recommend, `--calibrate-concurrency`, the
+   `--calibrate-context` upper bound, and `models adopt-recommendation`) is
+   the paged-plan context: it stays at the item 1–8 value unless the tier-1
+   paged plan (`slots = max(full-context fit or tier constant when unknown,
+   paged fit)`, capped at `max_concurrency_override_limit` with no policy cap,
+   where `paged fit` is the largest `N` in `1...max_concurrency_override_limit`
+   such that one row at the emitted context plus `N − 1` rows at 4,000 tokens,
+   each plus fixed recurrent bytes, fit `usable_kv_bytes`) is at least 2 and
+   the paged reservation does not fit (lowered, never below 4,000; dropping
+   below 2 restores the incoming context), or the model is an Inkling
+   continuous-batching layout whose single-row full-history cost exceeds
+   `usable_kv_bytes`, in which case it emits the largest context in
+   `[4000, context]` where two paged-reservation rows fit, or the largest
+   context where one honest row fits when two do not. When no concurrency
+   calibration override is set, tier-1 `autotune --recommend` (without draft)
+   also emits that paged-plan slot count (raising Inkling to 2 when two
+   paged-reservation rows fit); a concurrency calibration override keeps its
+   calibrated slot count (bounded by `memory_fit_cap`) while retaining the
+   same paged-plan context when uncalibrated. On `serve` (any tier, autotune-derived), the planned
+   row count is `max(full-context fit or tier constant when unknown, paged
+   fit)`, capped at 5 on Apple M1/M2 non-Ultra, at a positive signed
+   `max_served_slots`, and at 32 (and forced to 1 when withheld by a
+   running-build revocation, draft-pinned, or emergency-off); a 1-row result
+   keeps the incoming context except the Inkling honest-row clamp (and 2-row
+   raise when not withheld, draft-pinned, emergency-off, or policy-capped at
+   1). Unknown geometry keeps the tier constant and incoming context. Every
+   path that writes or validates a generated pair uses this same contract:
    - `models adopt-recommendation` refuses, before the runtime prepares
      anything or a byte is written, a signed recommendation whose
-     `max_concurrency_override` exceeds `memory_fit_cap` at its signed context
-     (or the tier constant when the fit is unknown); it never rewrites a
-     signed value. Every signed identity, context, slot, and draft check runs
-     on the verified artifact where it already is (a valid durable copy, else
-     the Hugging Face snapshot); only an adoption that passes them copies a
-     Hugging Face snapshot into the durable store.
+     `max_concurrency_override` exceeds the slot cap at its signed context or
+     whose uncalibrated `max_context_override` does not match the expected
+     context (items 1–8 for tier > 1 or draft; the tier-1 paged plan context
+     otherwise). The slot cap is the paged fit when the tier constant is 1,
+     and `memory_fit_cap` otherwise (the tier constant when the fit is
+     unknown). It never rewrites a signed value. Every signed identity,
+     context, slot, and draft check runs on the verified artifact where it
+     already is (a valid durable copy, else the Hugging Face snapshot); only
+     an adoption that passes them copies a Hugging Face snapshot into the
+     durable store.
    - `autotune --recommend --check-only --installed-only` reads the same
      identity without adoption and MUST NOT create or replace anything in the
      durable store (background checks never populate shared caches).
-   - A warm-switch recompute (SPEC-001 FR-20b) keeps the operator's configured
-     slot count (serve's `max_concurrency_override`, 1 with a draft model) and
-     lowers the recomputed context to the largest one at which that many slots
-     fit, never below 4,000.
-   - `serve` start (SPEC-001 FR-20b) applies the same context bound to a
-     `recommendation_apply` value for the configured model when the slot
-     count it runs (`max_concurrency_override` after `--max-batch` and the
-     environment, else 1) does not fit at the recorded value, and a switch
-     back to that model serves the lowered value. An operator-owned value is
-     never lowered.
-   - Floor exception (warm switch and `serve` start). When that many slots do
-     not fit even at `min(context, 4000)`, the context MUST NOT be served as if
-     it fit: it stays at `min(context, 4000)` and the served slot count is
-     lowered to `max(1, memory_fit_cap)` at that context. `serve` writes a
-     stderr warning naming both values and runs with the lowered count;
-     `status --advanced` warns that slots were lowered while `config.yaml`
-     keeps the configured count. A warm switch carries the lowered count for
-     that target through the same knob path an adoption uses, and a switch
-     back to the configured model restores the count serve started with. No
-     over-envelope pair is ever served on either path.
+   - A warm-switch recompute (SPEC-001 FR-20b) of a generated context for an
+     autotune-derived slot count uses that target's own planned row count
+     (1 with a draft model, running-build revocation, or policy ceiling of 1),
+     applies the target's signed ceiling and M1/M2 cap, and applies the same
+     paged context rule (including the Inkling adjustment when allowed). An
+     owner-pinned slot count keeps the pin (bounded by the target model's
+     signed ceiling and physical memory cap) and the full-context bound: the
+     context is the largest one at which that many full contexts fit, never
+     below 4,000.
+   - `serve` start (SPEC-001 FR-20b) applies the paged context rule to a
+     `recommendation_apply` value for an autotune-derived slot count (which
+     may raise an Inkling 1-row plan to 2 rows at a shorter context), and the
+     full-context bound to an owner pin, when that count does not fit at the
+     recorded value. A switch back to that model serves the bound pair. An
+     operator-owned context value is never lowered.
+   - Floor exception (owner pin / full-context bound on warm switch and `serve`
+     start). When an owner-pinned slot count does not fit even at
+     `min(context, 4000)`, the context MUST NOT be served as if it fit: it
+     stays at `min(context, 4000)` and the served slot count is lowered to
+     `max(1, memory_fit_cap)` at that context. `serve` writes a stderr warning
+     naming both values and runs with the lowered count; `status --advanced`
+     warns that slots were lowered while `config.yaml` keeps the configured
+     count. A warm switch carries the lowered count for that target through
+     the same knob path an adoption uses, and a switch back to the configured
+     model restores the count serve started with. On the autotune paged path,
+     a multi-row reservation that falls below 2 rows at `min(context, 4000)`
+     drops to 1 row at the incoming context (or the honest Inkling context)
+     rather than keeping a shortened floor context. No over-envelope pair is
+     ever served on either path.
    - The classic measured sweep (`autotune --apply` without `--recommend`)
      emits a measured (context, slots) cell, not this generated pair, so its
      config write carries no provenance record (and removes an earlier one):
@@ -3588,7 +3677,7 @@ AC-42 (`SPEC-023-R007`, hard-gate carve-out and 8 GB path): When every eligible 
 
 AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by holding `B` genuinely concurrent closed-loop workers at each swept batch depth `B` (never serialized single-stream replicates) with the configured synthetic request shape (`min(P, context − reserve − completion)` uncached prompt tokens and `C` completion tokens, defaults `P = 1792`, `C = 1024`, overridable by `--calibrate-concurrency-prompt-tokens` / `--calibrate-concurrency-completion-tokens`; distinct prompts) over a 30 s warmup and a 90 s measured window, records per-depth in-window aggregate tokens/sec, per-stream p95 TTFT, and (informational) median per-stream decode rate, measures every ladder depth up to the bound unless a depth exceeds the TTFT ceiling or errors, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lowest feasible depth within the aggregate-gain fraction of that highest aggregate. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 32)` and is never below `1`. A depth is feasible only when every request succeeds, no stop-token leak occurs, the window yields measurable throughput, and its per-stream p95 TTFT is within the buyer-facing ceiling; neither a TTFT increase over `B = 1` nor a slow per-stream decode rate rejects a depth. `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
 
-AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override`, lowered only by `SPEC-023-R018` item 9 (v0.15.2) when that many slots do not fit memory at the emitted context. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
+AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent. When the chip/RAM tier constant is above 1, that constant is emitted as `max_concurrency_override` and lowered only by the full-context term of `SPEC-023-R018` item 9. When the tier constant is 1 without a draft model, the command emits the `SPEC-023-R018` item 9 paged-plan context whenever context calibration is absent (including `--calibrate-concurrency` and the Inkling continuous-batching adjustment), and emits the paged-plan slot count whenever concurrency calibration is absent. The recommend command does not load the continuous-batching policy, so that emission is not capped by a signed `max_served_slots`; `serve` applies the cap (v0.22.50). Unknown geometry keeps the tier constant and context. A concurrency calibration override and a draft pin are not raised. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
 
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap is 32 (v0.22.16); only a `--calibrate-concurrency` measurement or an explicit operator value goes above the tier constant. A `--calibrate-concurrency` run MAY still emit a lower value.
 

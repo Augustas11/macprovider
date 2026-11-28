@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.134
+**Version:** 0.1.136
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.134",
+  "version": "0.1.136",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1804,15 +1804,22 @@ iterator, except for a serial native tuple (below).
 **(0.1.130) Serial native tuples (Related: #2487).** An adapter whose layout
 serves only serially MAY sign a serial native tuple: `cache_class`
 `serial_native`, `qualified_slots` 1 and `max_native_active_rows` 1. Today
-only `inkling2_dspark_v1` (MTP-2) does; its target is not a SPEC-039 paged-KV
-family and serves without continuous batching. For a serial native tuple the
-multi-slot scheduling, packing and window-reservation rules of this section
-and R014 item 5 (SPEC-038 FR-CB15/Gate A5, SPEC-039 FR-PKV13) do not apply.
-The provider serves native and ordinary requests one at a time, as its serial
-path already does: an admitted request whose other active rows reach the
-signed bound of 1 takes ordinary decode (the R007 load gate), and a native
-request runs the native iterator on the serial path from an empty cache with
-the whole prompt. A request that R004 makes ineligible (sampling, tools or a
+only `inkling2_dspark_v1` (MTP-2) does. Its target is a SPEC-039 paged-KV
+family and MAY serve ordinary decode through continuous batching. Native MTP
+stays serial: the multi-slot native scheduling, packing and
+window-reservation rules of this section and R014 item 5 (SPEC-038
+FR-CB15/Gate A5, SPEC-039 FR-PKV13) do not apply to its native path. When no
+other row is active, an admitted native request runs the native iterator on
+the serial path from an empty cache with the whole prompt, and that request
+MUST NOT be submitted to the scheduler with decode path `native_mtp`. When
+other rows are active, the R007 load gate (signed bound 1) admits the request
+as ordinary decode, and that request MAY run on the continuous-batch
+scheduler. A serial native row that still reaches a scheduler native-MTP
+proposal, and whose proposal fails, MUST continue on ordinary decode for the
+rest of the request instead of failing the buyer request. That downgrade
+applies only when every row in the round is a serial native family. A round
+that contains any other family keeps today's proposal failure, and a sticky
+non-serial native row MUST NOT switch paths. A request that R004 makes ineligible (sampling, tools or a
 grammar, non-text content), or that carries a conversation-cache lease, a
 resumed prefix or carried model state, takes ordinary serial decode. A native
 iterator that cannot start falls back to ordinary decode on a fresh cache
@@ -2161,6 +2168,12 @@ At SPEC-011 R-3.2.4 activation, the new snapshot publishes a fresh
 `reset_generation` and zeroed counters atomically; draining old-snapshot rows
 retain their old counter sink until termination and cannot write into the new
 generation. New requests cannot use the old capability after that boundary.
+
+A warm swap to a different model id clears native MTP. A warm swap onto a
+model with an admitted tuple loads that drafter and runs the same self-check
+as startup; a failed admission or self-check leaves native MTP off and does
+not fail the swap. A lab replay republishes the in-process qualification only
+when the published id is that admission's model id.
 
 The SPEC-001 v1.9.26 amendment admits this object only to local `/v1/status`.
 Heartbeat and state-update payloads MUST omit every native-MTP field until a
@@ -3380,6 +3393,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.136 (2026-11-27, Related: #2530)** — MTP-10: a warm swap onto a
+  model with an admitted tuple loads that drafter and runs the startup
+  self-check. Failure leaves native MTP off and does not fail the swap. A
+  different model id does not inherit the previous tuple. A lab replay
+  republishes the in-process qualification only for that admission's model id.
+- **0.1.135 (2026-11-27, Related: #2530)** — MTP-7: `inkling2_dspark_v1` may
+  serve ordinary decode through continuous batching. Native MTP stays on the
+  serial path while the runtime is idle and MUST NOT be submitted to the
+  scheduler as `native_mtp`. When other rows are active the load gate admits
+  ordinary decode on the scheduler. A serial-native proposal failure
+  downgrades that round to ordinary decode instead of failing the request;
+  any other family's proposal failure still fails its row.
 - **0.1.134 (2026-11-28)** — R003 names mlx-swift-lm `3.33.0-macprovider.93`
   (`e9146798dc4e0e73639e193113187752fdc8e322`) on `3.33.0-macprovider.92`
   (#2524): GLM-5.3-Flash KDA prefill runs the conv, SiLU and q/k L2 norm, and

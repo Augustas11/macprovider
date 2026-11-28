@@ -118,6 +118,165 @@ final class PagedKVInkling2Tests: XCTestCase {
         XCTAssertEqual(other.recurrentStateLayout, .mambaTwoSlot)
     }
 
+    /// Regression for Studio e2e r1: Inkling's real 48-visit `[CacheList]`
+    /// (8 global `KVCacheSimple` + 40 sliding-window keep-0 `RotatingKVCache`,
+    /// each paired with `ConvolutionTailCache`) must classify as `"mixed"`,
+    /// attach paged KV (never `fallback_paged_fallback_cache_class`), and be
+    /// eligible for continuous batching under both default-on coverage and an
+    /// explicit CB policy tuple carrying `cache_class: "mixed"`.
+    func testInklingRealCacheListClassifiesAsMixedAttachesPagedKVAndEnablesCB() throws {
+        let modelID = "thinkingmachines/inkling-2-mini"
+        let modelSHA = "75509c7fcd864d109d542676ed14763a2c5c570c731f3c1d1180d0207b6b9b34"
+        let metallibSHA = String(repeating: "a", count: 64)
+        let hardwareClass = "apple-silicon:Apple M5:ram-32gb"
+        let kernelID = PagedKVGatherKernel.registeredKernelName
+        let parityLabel = "sdpa-parity-v1"
+        let data = Data(Self.miniConfig.utf8)
+
+        let globalVisits: Set<Int> = [5, 11, 17, 23, 29, 35, 41, 47]
+        let realInklingCaches: [KVCache] = (0 ..< 48).map { visit in
+            let attention: KVCache = globalVisits.contains(visit)
+                ? KVCacheSimple()
+                : RotatingKVCache(maxSize: 1024, keep: 0)
+            return CacheList(attention, ConvolutionTailCache(size: 4))
+        }
+
+        let runtimeCacheClass = ModelRuntime.pagedKVRuntimeCacheClass(caches: realInklingCaches)
+        XCTAssertEqual(runtimeCacheClass, "mixed")
+
+        let capabilities = ModelRuntime.pagedKVModelCapabilities(modelID: modelID, configJSONData: data)
+        XCTAssertTrue(capabilities.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass(
+            runtimeCacheClass,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified
+        ))
+
+        let flattenedKinds = try XCTUnwrap(
+            PagedKVSharedForwardBackend.CacheKind.kinds(from: PagedKVInkling2Layout.flattened(realInklingCaches))
+        )
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(flattenedKinds, modelCapabilities: capabilities))
+
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let proof = PagedKVHardwareSizingProof(
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: capabilities.modelFamily,
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA,
+            kernelIdentifier: kernelID,
+            blockSizeTokens: config.blockSizeTokens,
+            maxPhysicalBlocks: config.maxPhysicalBlocks,
+            maxResidentTokens: config.blockSizeTokens * config.maxPhysicalBlocks,
+            parityLabel: parityLabel
+        )
+        let observed = PagedKVObservedRuntimeIdentity(
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA,
+            kernelIdentifier: kernelID,
+            parityLabel: parityLabel,
+            moeDispatchProven: true,
+            poolEpoch: proof.poolEpoch,
+            source: .runtimeMeasurement
+        )
+        let gates = PagedKVGates(
+            identityAvailable: true,
+            observedHardwareClass: hardwareClass,
+            metallibAvailable: true,
+            kernelRegistered: true,
+            parityEstablished: true,
+            hardwareSizingProof: proof,
+            observedMetallibSHA256: metallibSHA,
+            observedKernelIdentifier: kernelID,
+            observedParityLabel: parityLabel,
+            moeDispatchProven: true,
+            engineBridgeAvailable: true,
+            observedRuntimeIdentity: observed
+        )
+
+        let decision = PagedKVAttachGate.decide(
+            config: config,
+            runtimeCacheClass: runtimeCacheClass,
+            kvBits: nil,
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: capabilities.modelFamily,
+            requiresMoEDispatch: true,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
+            gates: gates
+        )
+        let descriptor = try XCTUnwrap(decision.descriptor, "Inkling real CacheList must attach paged KV, got \(decision)")
+        XCTAssertNil(decision.reason)
+
+        let requestedTuple = ContinuousBatchingRequestedTuple(
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            cacheClass: runtimeCacheClass,
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA,
+            kernelIdentifier: kernelID,
+            parityLabel: parityLabel,
+            poolEpoch: descriptor.poolEpoch
+        )
+        let explicitTuple = ContinuousBatchingAcceptedTuple(
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            cacheClass: "mixed",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: hardwareClass,
+            metallibSHA256: metallibSHA,
+            kernelIdentifier: kernelID
+        )
+        for coverage in [
+            ContinuousBatchingAcceptanceCoverage.defaultOn(revocations: [], acceptedTuples: [explicitTuple]),
+            ContinuousBatchingAcceptanceCoverage(acceptedTuples: [explicitTuple]),
+        ] {
+            let cb = ContinuousBatchingPolicy.capability(
+                mode: .canary,
+                maxBatch: 2,
+                queueLimit: nil,
+                kvBits: nil,
+                draftConfigured: false,
+                schedulerBackendAvailable: true,
+                pagedKVDecision: decision,
+                requestedTuple: requestedTuple,
+                acceptanceCoverage: coverage
+            )
+            XCTAssertNil(cb.unsupportedReason)
+            XCTAssertFalse(cb.shouldUseSerialPath)
+            XCTAssertEqual(cb.maxActiveRows, 2)
+        }
+
+        // Non-visit CacheLists (e.g. MambaCache children) must remain "CacheList" and fail closed.
+        let nonInklingCaches: [KVCache] = [CacheList(KVCacheSimple(), MambaCache())]
+        let nonInklingClass = ModelRuntime.pagedKVRuntimeCacheClass(caches: nonInklingCaches)
+        XCTAssertEqual(nonInklingClass, "CacheList")
+        let rejected = PagedKVAttachGate.decide(
+            config: config,
+            runtimeCacheClass: nonInklingClass,
+            kvBits: nil,
+            modelID: modelID,
+            modelSHA256: modelSHA,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: capabilities.modelFamily,
+            requiresMoEDispatch: true,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
+            gates: gates
+        )
+        XCTAssertEqual(rejected, .fallback(.cacheClass))
+    }
+
     func testFourSlotTailsPackAndSyncByRow() throws {
         try requireMetal()
         try Device.withDefaultDevice(.cpu) {

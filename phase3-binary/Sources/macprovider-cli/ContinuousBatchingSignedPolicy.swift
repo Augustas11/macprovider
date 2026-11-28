@@ -36,10 +36,18 @@ struct ContinuousBatchingRevocation: Sendable, Equatable {
     let metallibSHA256: String
     let kernelIdentifier: String
 
+    func revokes(modelSHA256: String, metallibSHA256: String, kernelIdentifier: String) -> Bool {
+        self.modelSHA256 == modelSHA256
+            && self.metallibSHA256 == metallibSHA256
+            && self.kernelIdentifier == kernelIdentifier
+    }
+
     func revokes(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
-        tuple.modelSHA256 == modelSHA256
-            && tuple.metallibSHA256 == metallibSHA256
-            && tuple.kernelIdentifier == kernelIdentifier
+        revokes(
+            modelSHA256: tuple.modelSHA256,
+            metallibSHA256: tuple.metallibSHA256,
+            kernelIdentifier: tuple.kernelIdentifier
+        )
     }
 }
 
@@ -88,6 +96,30 @@ struct ContinuousBatchingPolicySelection: Sendable, Equatable {
     func servedSlotCeiling(modelKeys: Set<String>) -> Int? {
         entries.filter { $0.rollout != .off && modelKeys.contains($0.modelKey) }
             .compactMap(\.maxServedSlots).min()
+    }
+
+    /// A rollout-off revocation of this running build. The match is the model
+    /// artifact, the Metal library, and the paged-KV kernel. A catalog key
+    /// alone does not withhold: a stale-build revocation must not force one row.
+    /// A missing digest does not withhold.
+    func revokesRunningBuild(
+        modelSHA256: String?,
+        modelFamily: String?,
+        metallibSHA256: String?
+    ) -> Bool {
+        guard let modelSHA256, !modelSHA256.isEmpty,
+              let metallibSHA256, !metallibSHA256.isEmpty
+        else { return false }
+        let kernel = modelFamily == "deepseek_v4"
+            ? PagedKVAttachGate.deepseekV4RowPoolBridgeIdentifier
+            : PagedKVGatherKernel.registeredKernelName
+        return revocations.contains {
+            $0.revokes(
+                modelSHA256: modelSHA256,
+                metallibSHA256: metallibSHA256,
+                kernelIdentifier: kernel
+            )
+        }
     }
 }
 

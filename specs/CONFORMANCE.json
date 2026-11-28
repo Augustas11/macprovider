@@ -3238,7 +3238,9 @@
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testWindowWithNoInWindowDecodeHasNoDecodeRate",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testHonorsCustomTTFTCeiling",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testDraftConfiguredPinsMaxBatchToOne",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testConcurrencyCalibrationJSONAndApplyAreOptIn"
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testConcurrencyCalibrationJSONAndApplyAreOptIn",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testPagedRowCountRaisesA32GBMacAboveOneSerialRow",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendWriterRaisesTierOnePagedFitAndLeavesDraftAndCalibration"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -3453,6 +3455,11 @@
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:static func validatedAdoptionArtifact(",
         "phase3-binary/Sources/macprovider-cli/ProviderContextCommand.swift:static func startupBoundedContext(",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func memoryBoundedServePair(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func inklingSerialRotatingKVPricing(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func plannedRowCount(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func pagedServePlan(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func pagedServedContext(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func pagedPoolTokens(",
         "phase3-binary/Sources/macprovider-cli/ProviderContextCommand.swift:static func serveSlotsByTarget("
       ],
       "tests": [
@@ -3478,7 +3485,11 @@
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testInstalledOnlyCheckNeverPopulatesTheDurableStore",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testMatchedFloorSmallDenseRowsUseVerifiedArtifactSizeInsteadOfCatalogMinRAMAsResidency",
         "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testSwitchRecomputeUsesVerifiedWeightSizeAtMatchedCatalogFloor",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testLiveModelFactsUsesRecursiveArtifactByteCountForMemoryEnvelope"
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testLiveModelFactsUsesRecursiveArtifactByteCountForMemoryEnvelope",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testInklingKVBytesFollowThePagedLayout",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testPagedRowCountRaisesA32GBMacAboveOneSerialRow",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendWriterRaisesTierOnePagedFitAndLeavesDraftAndCalibration",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testAdoptRecommendationAcceptsTierOneInklingPagedContextForPlainAndCalibratedConcurrency"
       ],
       "journeys": [],
       "evidence": [],
@@ -5852,7 +5863,10 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:func servedSlotCeiling(modelSHA256",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:var policyCeiling: Int?",
         "phase4-coordinator/internal/buyer/continuous_batching_policy_feed.go:func continuousBatchingMaxServedSlots",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func rowsUnderPolicyCeiling"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func rowsUnderPolicyCeiling",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func plannedRowCount(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func pagedServedContext(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:func revokesRunningBuild("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testOwnerPinnedIsKept",
@@ -5867,7 +5881,8 @@
         "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsValidation",
         "phase4-coordinator/internal/buyer/continuous_batching_policy_max_served_slots_test.go:TestContinuousBatchingPolicyMaxServedSlotsTupleIdentity",
         "scripts/tests/test_cb_policy_max_served_slots.py::MaxServedSlotsGeneratorTest",
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testWarmSwapAppliesOnlyTheTargetModelsPolicyCeilingToSchedulerRows"
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testWarmSwapAppliesOnlyTheTargetModelsPolicyCeilingToSchedulerRows",
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testRevocationWithholdsOnlyTheRunningBuild"
       ],
       "journeys": [],
       "evidence": [],
@@ -5988,13 +6003,22 @@
       "spec_id": "SPEC-038",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func mlxMemoryAdmissionRefusal"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func mlxMemoryAdmissionRefusal",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func admitPreemptedRows",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func resolveCapacityDeadlockIfNeeded",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func evictOldestIdleRetainedPagedKV"
       ],
       "tests": [
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testAdmissionAtTheLimit",
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testKVBytesSaturatesAndIgnoresUnknownGeometry",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitDefersRowWhileOtherRowsRun",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitAdmitsRowsThatFitWithoutDiagnostics"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitAdmitsRowsThatFitWithoutDiagnostics",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testExtensionCapacityDeadlockPreemptsDeterministicallyAndCompletesWithoutError",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDeadlockWithAllRowsHavingOutputFailsNewestAtOnceWithoutParking",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testOmittedMaxTokensAdmitsConcurrentlyAgainstServePagedPool",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPreemptionBoundFailsClosedDeterministically",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testReattachedCachedTurnRowSuspendsAndPreemptsInsteadOfFailingExtension",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testIdleRetainedCachedTurnReclaimedUnderPoolPressureForLoneGrowingRow"
       ],
       "journeys": [],
       "evidence": [],
@@ -12125,7 +12149,9 @@
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testInkling2SerialNativeMTPAdmissionGate",
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testSerialNativeMTPEligibility",
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testSerialOnlyRefusalAppliesToEveryAdapterButSerialNativeTuples",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsInkling2TuplesOutsideTheSerialShape"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsInkling2TuplesOutsideTheSerialShape",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testSerialNativeFamilySubmitsOrdinaryDecodeToTheScheduler",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testLoneInklingNativeMTPRequestStaysOnTheSerialIterator"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -12193,7 +12219,9 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testStatusObjectUsesClosedR010FieldSetAndDerivedCounters",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testMetricsSamplesUseOnlyBoundedLabels",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testCounterSaturationDisablesNativeTupleUntilNewSinkGeneration",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testLocalStatusPublishesCapabilityAndExactlyOneNativeMTPObject"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPStatusTests.swift:testLocalStatusPublishesCapabilityAndExactlyOneNativeMTPObject",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPSwapReloadsOnlyTheAdmittedModelID",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testCompleteSwapToInklingPublishesCapabilityAndDropsTheDrafterAfterAFailedSelfCheck"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"

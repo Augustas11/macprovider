@@ -3994,7 +3994,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
     // The production row cap is the served context: a 200k provider batches
     // a prompt + max_tokens between the old 131,072 default and 200k.
-    // Multi-row reserves prompt + headroom, so the small test pool suffices.
+    // Admission reserves prompt + decode headroom, so a 2-token prompt with a
+    // 199,960-token ceiling still admits on a small pool.
     func testRequestTokenCapAboveLegacyDefaultAdmitsLongRows() async throws {
         let backend = ScriptedBackend(scripts: ["long": [7]])
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
@@ -5301,8 +5302,64 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testAC17AC24MidDecodeAllocatorExtensionFailureFailsOnlyThatRowAndReleasesBlocks() async throws {
         let decodeGate = AsyncGate()
         let backend = ScriptedBackend(scripts: [
+            "a-healthy": [8, 9, 10, 11, 12, 13],
+            "z-fail": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        ], decodeGate: decodeGate)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 2)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: Self.configuration(
+                descriptor: Self.descriptor(blockSizeTokens: 8, maxPhysicalBlocks: 2),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 1
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+
+        let healthy = Task {
+            try await scheduler.submit(.init(
+                id: "a-healthy",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 6
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        let failing = Task {
+            try await scheduler.submit(.init(
+                id: "z-fail",
+                conversationKey: "",
+                promptTokens: [2, 3, 4, 5, 6, 7, 8],
+                maxOutputTokens: 12
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let firstResult = try await healthy.value
+        let secondResult = try await failing.value
+
+        XCTAssertEqual(firstResult.terminalStatus, .length)
+        XCTAssertEqual(firstResult.outputTokens, [8, 9, 10, 11, 12, 13])
+        XCTAssertEqual(secondResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(secondResult.errorCode, "continuous_batching_block_extension_failed")
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.localExtensionFailed))
+    }
+
+    /// SPEC-038 FR-CB1 / FR-CB17 (v0.3.68): when concurrent rows exhaust the
+    /// shared paged pool, deadlock prefers a victim with no buyer-visible
+    /// output (`outputTokens.isEmpty`), parks it in `preemptedRows`, and
+    /// resumes it once blocks free without duplicating emitted output.
+    func testExtensionCapacityDeadlockPreemptsDeterministicallyAndCompletesWithoutError() async throws {
+        let decodeGate = AsyncGate()
+        let zRecorder = TokenEventRecorder()
+        let backend = ScriptedBackend(scripts: [
             "a-healthy": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
-            "z-fail": [2, 3, 4, 5],
+            "z-preempt": [2, 3, 4, 5],
         ], decodeGate: decodeGate)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 2)
         let scheduler = ContinuousBatchScheduler(
@@ -5325,32 +5382,452 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
         try await eventually { await backend.decodeCallCount() == 1 }
-        let failing = Task {
+        // Tokens `[2, 3]` are buffered as a prefix of stop sequence `[2, 3, 99]`,
+        // so `z-preempt` has no buyer-visible output yet when its second decode
+        // step needs a second 8-token block and deadlock strikes.
+        let preempted = Task {
+            try await scheduler.submit(
+                .init(
+                    id: "z-preempt",
+                    conversationKey: "",
+                    promptTokens: [2, 3, 4, 5, 6, 7, 8],
+                    maxOutputTokens: 4,
+                    stopTokenSequences: [[2, 3, 99]]
+                ),
+                tokenSink: { zRecorder.append($0) }
+            )
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let aResult = try await healthy.value
+        let zResult = try await preempted.value
+
+        XCTAssertEqual(aResult.terminalStatus, .length)
+        XCTAssertEqual(aResult.outputTokens, [8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        XCTAssertEqual(zResult.terminalStatus, .length)
+        XCTAssertEqual(zResult.outputTokens, [2, 3, 4, 5])
+        XCTAssertEqual(zRecorder.events().map(\.token), [2, 3, 4, 5])
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.extensionSuspended))
+        XCTAssertTrue(metrics.diagnostics.contains(.rowPreempted))
+        XCTAssertFalse(metrics.diagnostics.contains(.localExtensionFailed))
+    }
+
+    /// SPEC-038 FR-CB17 (v0.3.68): when two rows outgrow the pool and every
+    /// active row has already streamed buyer-visible output, the newest row
+    /// fails at once with `continuous_batching_pool_capacity_preempted` instead
+    /// of being parked past the gateway's content-idle timeout.
+    func testDeadlockWithAllRowsHavingOutputFailsNewestAtOnceWithoutParking() async throws {
+        let decodeGate = AsyncGate()
+        let zRecorder = TokenEventRecorder()
+        let backend = ScriptedBackend(scripts: [
+            "a-healthy": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            "z-streamed": [2, 3, 4, 5],
+        ], decodeGate: decodeGate)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 2)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: Self.configuration(
+                descriptor: Self.descriptor(blockSizeTokens: 8, maxPhysicalBlocks: 2),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 1
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+
+        let healthy = Task {
             try await scheduler.submit(.init(
-                id: "z-fail",
+                id: "a-healthy",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 10
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        let streamed = Task {
+            try await scheduler.submit(
+                .init(
+                    id: "z-streamed",
+                    conversationKey: "",
+                    promptTokens: [2, 3, 4, 5, 6, 7, 8],
+                    maxOutputTokens: 4
+                ),
+                tokenSink: { zRecorder.append($0) }
+            )
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let aResult = try await healthy.value
+        let zResult = try await streamed.value
+
+        XCTAssertEqual(aResult.terminalStatus, .length)
+        XCTAssertEqual(aResult.outputTokens, [8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        XCTAssertEqual(zResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(zResult.errorCode, "continuous_batching_pool_capacity_preempted")
+        XCTAssertEqual(zRecorder.events().map(\.token), [2, 3])
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.extensionSuspended))
+        XCTAssertTrue(metrics.diagnostics.contains(.localExtensionFailed))
+        XCTAssertFalse(metrics.diagnostics.contains(.rowPreempted))
+    }
+
+    /// SPEC-038 FR-CB1 / FR-CB11 (v0.3.68): N rows with omitted `max_tokens`
+    /// (`maxOutputTokens = context - prompt`) admit and decode concurrently
+    /// against the exact paged pool `serve` constructs (`C + (N - 1) x 4,000`).
+    func testOmittedMaxTokensAdmitsConcurrentlyAgainstServePagedPool() async throws {
+        let cases: [(context: Int, rows: Int)] = [
+            (context: 46_319, rows: 2),
+            (context: 200_000, rows: 4),
+        ]
+        for entry in cases {
+            let poolTokens = AutotuneModelContextCap.pagedPoolTokens(
+                contextTokens: entry.context,
+                rows: entry.rows
+            )
+            let pagedConfig = PagedKVConfig.defaults().sizedToCover(contextTokens: poolTokens)
+            let descriptor = Self.descriptor(
+                blockSizeTokens: pagedConfig.blockSizeTokens,
+                maxPhysicalBlocks: pagedConfig.maxPhysicalBlocks
+            )
+            let allocator = try PagedKVBlockAllocator(
+                blockSizeTokens: pagedConfig.blockSizeTokens,
+                maxPhysicalBlocks: pagedConfig.maxPhysicalBlocks
+            )
+            let decodeGate = AsyncGate()
+            var scripts: [String: [Int]] = [:]
+            for idx in 0..<entry.rows {
+                scripts["row-\(idx)"] = [10, 11, 12]
+            }
+            let backend = ScriptedBackend(scripts: scripts, decodeGate: decodeGate)
+            let scheduler = ContinuousBatchScheduler(
+                configuration: ContinuousBatchSchedulerConfiguration(
+                    descriptor: descriptor,
+                    tuple: Self.tuple(),
+                    maxActiveRows: entry.rows,
+                    decodeHeadroomTokens: 4,
+                    maxPrefillRowsPerIteration: entry.rows,
+                    maxPromptChunkTokens: 16,
+                    maxRequestTokens: entry.context,
+                    snapshot: ContinuousBatchSchedulerSnapshot(
+                        modelID: Self.modelID,
+                        modelSHA256: Self.modelSHA,
+                        weightsGeneration: 3
+                    )
+                ),
+                allocator: allocator,
+                backend: backend,
+                replayAuthority: TestReplayAuthority()
+            )
+
+            let prompt = [1, 2, 3, 4]
+            let omittedMaxOutput = entry.context - prompt.count
+            let firstTask = Task {
+                try await scheduler.submit(.init(
+                    id: "row-0",
+                    conversationKey: "",
+                    promptTokens: prompt,
+                    maxOutputTokens: omittedMaxOutput,
+                    stopTokenSequences: [[12]],
+                    modelStopTokenIDs: [12]
+                ))
+            }
+            try await eventually { await backend.decodeCallCount() == 1 }
+            var peerTasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+            for idx in 1..<entry.rows {
+                let id = "row-\(idx)"
+                peerTasks.append(Task {
+                    try await scheduler.submit(.init(
+                        id: id,
+                        conversationKey: "",
+                        promptTokens: prompt,
+                        maxOutputTokens: omittedMaxOutput,
+                        stopTokenSequences: [[12]],
+                        modelStopTokenIDs: [12]
+                    ))
+                })
+            }
+            let expectedWaiting = entry.rows - 1
+            try await eventually { await scheduler.metrics().waitingCount == expectedWaiting }
+            await decodeGate.open()
+
+            var results = [try await firstTask.value]
+            for task in peerTasks {
+                results.append(try await task.value)
+            }
+            for result in results {
+                XCTAssertEqual(result.terminalStatus, .stop)
+                XCTAssertEqual(result.outputTokens, [10, 11])
+            }
+            let metrics = await scheduler.metrics()
+            XCTAssertEqual(
+                metrics.maxObservedBatchDepth,
+                entry.rows,
+                "omitted max_tokens must not serialize CB for \(entry.rows)x\(entry.context)"
+            )
+            let freeBlocks = await allocator.freeBlockCount()
+            XCTAssertEqual(freeBlocks, pagedConfig.maxPhysicalBlocks)
+        }
+    }
+
+    /// SPEC-038 FR-CB17 (v0.3.68): preemption is bounded by
+    /// `maxPreemptionsPerRow`; when every deadlocked row hits the bound, the
+    /// newest row fails closed deterministically so the rest progress.
+    func testPreemptionBoundFailsClosedDeterministically() async throws {
+        let decodeGate = AsyncGate()
+        let backend = ScriptedBackend(scripts: [
+            "a-healthy": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            "z-bound": [2, 3, 4, 5],
+        ], decodeGate: decodeGate)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 2)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: ContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 8, maxPhysicalBlocks: 2),
+                tuple: Self.tuple(),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 1,
+                maxPrefillRowsPerIteration: 1,
+                maxPromptChunkTokens: 2,
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: Self.modelID,
+                    modelSHA256: Self.modelSHA,
+                    weightsGeneration: 3
+                ),
+                maxPreemptionsPerRow: 0
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: TestReplayAuthority()
+        )
+
+        let healthy = Task {
+            try await scheduler.submit(.init(
+                id: "a-healthy",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 10
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        let bounded = Task {
+            try await scheduler.submit(.init(
+                id: "z-bound",
                 conversationKey: "",
                 promptTokens: [2, 3, 4, 5, 6, 7, 8],
-                maxOutputTokens: 4
+                maxOutputTokens: 4,
+                stopTokenSequences: [[2, 3, 99]]
             ))
         }
         try await eventually { await scheduler.metrics().waitingCount == 1 }
         await decodeGate.open()
 
-        let firstResult = try await healthy.value
-        let secondResult = try await failing.value
-        let results = [firstResult, secondResult]
+        let aResult = try await healthy.value
+        let zResult = try await bounded.value
 
-        XCTAssertEqual(results.filter { $0.terminalStatus == .length }.count, 1)
-        XCTAssertEqual(results.filter { $0.terminalStatus == .requestFailed }.count, 1)
-        XCTAssertEqual(
-            results.first { $0.terminalStatus == .requestFailed }?.errorCode,
-            "continuous_batching_block_extension_failed"
-        )
-        XCTAssertFalse(results.first { $0.terminalStatus == .length }?.outputTokens.isEmpty ?? false)
+        XCTAssertEqual(aResult.terminalStatus, .length)
+        XCTAssertEqual(aResult.outputTokens, [8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        XCTAssertEqual(zResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(zResult.errorCode, "continuous_batching_pool_capacity_preempted")
         let freeBlocks = await allocator.freeBlockCount()
         XCTAssertEqual(freeBlocks, 2)
         let metrics = await scheduler.metrics()
         XCTAssertTrue(metrics.diagnostics.contains(.localExtensionFailed))
+        XCTAssertFalse(metrics.diagnostics.contains(.rowPreempted))
+    }
+
+    /// SPEC-038 FR-CB17 (v0.3.68): a reattached cached-turn row reserves no
+    /// extra blocks at reattach; when extending its suffix hits
+    /// `capacityExceeded` while a peer occupies the last free block, the
+    /// no-output reattached row suspends and is preempted on deadlock, then
+    /// resumes at `minCapacity` and completes without error.
+    func testReattachedCachedTurnRowSuspendsAndPreemptsInsteadOfFailingExtension() async throws {
+        let decodeGate = AsyncGate()
+        let turn2Recorder = TokenEventRecorder()
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 3)
+        let backend = ScriptedBackend(
+            scripts: [
+                "turn-1": [10],
+                "peer": [21, 22, 23, 24, 25, 26],
+                "turn-2": [40, 41],
+            ],
+            decodeGate: decodeGate
+        )
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 3),
+            maxActiveRows: 2,
+            decodeHeadroomTokens: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let turn1 = try await scheduler.submit(.init(
+            id: "turn-1",
+            conversationKey: "conv:r2m1",
+            promptTokens: [1, 2, 3, 4, 5],
+            maxOutputTokens: 1,
+            temperature: 0.0
+        ))
+        XCTAssertEqual(turn1.terminalStatus, .length)
+        let retained = try XCTUnwrap(turn1.retainedCache)
+        await scheduler.acknowledgeRetainedCacheDelivery(retained)
+        let cachedTokens = retained.retainedSequence.logicalTokenCount
+        XCTAssertGreaterThanOrEqual(cachedTokens, 5)
+        XCTAssertLessThan(cachedTokens, 8)
+        let freeAfterRetain = await allocator.freeBlockCount()
+        XCTAssertEqual(freeAfterRetain, 1)
+
+        // Peer occupies the last free block and pauses on its first decode step.
+        let peerTask = Task {
+            try await scheduler.submit(.init(
+                id: "peer",
+                conversationKey: "",
+                promptTokens: [20],
+                maxOutputTokens: 6
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+
+        // Turn 2 reattaches the 2 retained blocks (capacity 8) with 0 free
+        // blocks and needs a 3rd block for its 10-token prompt suffix (before
+        // any output streams), suspending and then preempting cleanly on deadlock.
+        let suffixCount = 10 - cachedTokens
+        let turn2Prefix = Array([1, 2, 3, 4, 5, 10].prefix(cachedTokens))
+        let turn2Prompt = turn2Prefix + Array(30..<(30 + suffixCount))
+        let turn2Task = Task {
+            try await scheduler.submit(
+                .init(
+                    id: "turn-2",
+                    conversationKey: "conv:r2m1",
+                    promptTokens: turn2Prompt,
+                    maxOutputTokens: 2,
+                    temperature: 0.0,
+                    cachedPromptTokens: cachedTokens,
+                    retainedPagedKVSequence: retained.retainedSequence
+                ),
+                tokenSink: { turn2Recorder.append($0) }
+            )
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let peerResult = try await peerTask.value
+        let turn2Result = try await turn2Task.value
+        if let turn2Retained = turn2Result.retainedCache {
+            await scheduler.discardRetainedCache(turn2Retained.retainedSequence, conversationKey: "conv:r2m1")
+        }
+
+        XCTAssertEqual(peerResult.terminalStatus, .length)
+        XCTAssertEqual(peerResult.outputTokens, [21, 22, 23, 24, 25, 26])
+        XCTAssertEqual(turn2Result.terminalStatus, .length)
+        XCTAssertEqual(turn2Result.outputTokens, [40, 41])
+        XCTAssertEqual(turn2Recorder.events().map(\.token), [40, 41])
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 3)
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.extensionSuspended))
+        XCTAssertTrue(metrics.diagnostics.contains(.rowPreempted))
+        XCTAssertFalse(metrics.diagnostics.contains(.localExtensionFailed))
+    }
+
+    /// SPEC-038 FR-CB17 (v0.3.68): when an idle cached turn holds retained
+    /// paged blocks in `ConversationCache` and a lone growing row hits
+    /// `capacityExceeded`, the scheduler evicts the idle retained entry in LRU
+    /// order and retries `extend` so the growing row finishes without error.
+    func testIdleRetainedCachedTurnReclaimedUnderPoolPressureForLoneGrowingRow() async throws {
+        let conversationCache = makeConversationCacheForTest(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 3)
+        let backend = ScriptedBackend(scripts: [
+            "turn-1": [10, 11],
+            "lone-chat": [22, 23, 24, 25, 26, 27, 28, 29],
+        ])
+        let scheduler = ContinuousBatchScheduler(
+            configuration: ContinuousBatchSchedulerConfiguration(
+                descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 3),
+                tuple: Self.tuple(),
+                maxActiveRows: 2,
+                decodeHeadroomTokens: 1,
+                maxPrefillRowsPerIteration: 1,
+                maxPromptChunkTokens: 4,
+                snapshot: ContinuousBatchSchedulerSnapshot(
+                    modelID: Self.modelID,
+                    modelSHA256: Self.modelSHA,
+                    weightsGeneration: 3
+                )
+            ),
+            allocator: allocator,
+            backend: backend,
+            replayAuthority: TestReplayAuthority(),
+            contiguousCacheBridge: HeadlessRetainedCacheBridge(),
+            reclaimIdleRetainedPagedKV: { excluded in
+                await conversationCache.evictOldestIdleRetainedPagedKV(excludingKeys: excluded)
+            }
+        )
+
+        let idleKey = "conv:idle-retained"
+        let firstPrompt = [1, 2, 3, 4, 5, 6]
+        let begunLease = await conversationCache.begin(
+            conversationKey: idleKey,
+            incomingTokens: firstPrompt.map(Int32.init),
+            modelID: Self.modelID,
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true
+        )
+        let lease = try XCTUnwrap(begunLease)
+        let turn1 = try await scheduler.submit(.init(
+            id: "turn-1",
+            conversationKey: idleKey,
+            promptTokens: firstPrompt,
+            maxOutputTokens: 2,
+            temperature: 0.0
+        ))
+        XCTAssertEqual(turn1.terminalStatus, .length)
+        let retained = try XCTUnwrap(turn1.retainedCache)
+        await conversationCache.commit(
+            lease,
+            cache: ConversationCacheLayers(
+                retained.layers,
+                retainedPagedKVSequence: retained.retainedSequence,
+                discardRetainedPagedKVSequence: { seq, key in
+                    await scheduler.discardRetainedCache(seq, conversationKey: key)
+                },
+                recurrentCheckpoints: retained.recurrentCheckpoints
+            ),
+            fullTokens: (firstPrompt + turn1.generatedTokens).map(Int32.init)
+        )
+        await scheduler.acknowledgeRetainedCacheDelivery(retained)
+
+        let freeWhileIdleRetained = await allocator.freeBlockCount()
+        XCTAssertEqual(freeWhileIdleRetained, 1, "idle retained turn holds 2 of 3 blocks")
+        let statsBefore = await conversationCache.snapshotStats()
+        XCTAssertEqual(statsBefore.entries, 1)
+
+        // Lone growing row needs 10 tokens (3 blocks) and can finish only by
+        // reclaiming the idle retained turn's 2 blocks under pool pressure.
+        let lone = try await scheduler.submit(.init(
+            id: "lone-chat",
+            conversationKey: "",
+            promptTokens: [20, 21],
+            maxOutputTokens: 8
+        ))
+        XCTAssertEqual(lone.terminalStatus, .length)
+        XCTAssertEqual(lone.outputTokens, [22, 23, 24, 25, 26, 27, 28, 29])
+        let statsAfter = await conversationCache.snapshotStats()
+        XCTAssertEqual(statsAfter.entries, 0, "idle retained entry was evicted under pool pressure")
+        let freeAfter = await allocator.freeBlockCount()
+        XCTAssertEqual(freeAfter, 3)
+        let metrics = await scheduler.metrics()
+        XCTAssertFalse(metrics.diagnostics.contains(.localExtensionFailed))
     }
 
     func testAC11BatchForwardFailureCleansEveryParticipatingRow() async throws {
@@ -10344,6 +10821,33 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    /// #2530 item 2.1: a serial native family's packed proposal cannot run.
+    /// The row continues on ordinary decode instead of failing the request.
+    func testSerialNativeMTPProposalFailureDowngradesToOrdinaryDecode() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["serial-fallback": [11, 12]],
+            prefillTokens: ["serial-fallback": 6],
+            nativeTargetTopTokens: ["serial-fallback": [7]],
+            nativeProposalError: BackendFailure()
+        )
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "serial-fallback",
+            promptTokens: [1],
+            maxOutputTokens: 2,
+            proposals: [7],
+            maximumDepth: 1,
+            familyAdapter: "inkling2_dspark_v1"
+        ))
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertNil(result.errorCode)
+        XCTAssertEqual(result.generatedTokens.count, 2)
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertGreaterThanOrEqual(decodeCalls, 1)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+    }
+
     func testNativeMTPFirstRoundFailureBeforeVisibleOutputDoesNotIncrementPostoutputFailures() async throws {
         let sink = NativeMTPStatusSink(
             supported: true,
@@ -10786,8 +11290,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testMLXMemoryLimitDefersRowWhileOtherRowsRun() async throws {
         let decodeGate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["blocker": [4, 5, 7], "big": [6]], decodeGate: decodeGate)
-        // Initial footprints: blocker 1 + 2 headroom tokens, big 2 + 1 output
-        // tokens; 3 x 10 bytes each, and 100 active + 30 > 125.
+        // Initial footprints are prompt + decode headroom (2): blocker 1 + 2
+        // tokens (30 bytes) and big 2 + 1 (30 bytes). 100 active + 30 > 125.
         let scheduler = try await makeScheduler(
             maxActiveRows: 2,
             mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 125, activeBytes: 100, kvBytesPerToken: 10),

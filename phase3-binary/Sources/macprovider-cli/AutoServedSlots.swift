@@ -167,4 +167,32 @@ extension AutoServedSlots {
             verifiedArtifactSizeBytes: artifactBytes
         )
     }
+
+    /// Paged reservation at the served context: one row at `contextTokens`,
+    /// every other row at the 4,000-token floor. Same binding rules as
+    /// `memoryFitSlots`. Does not change that function's full-context meaning.
+    static func pagedFitSlots(
+        configJSONData: Data?,
+        memoryGB: Int,
+        catalogMinRAMGB: Int?,
+        contextTokens: Int,
+        weightsBytes: UInt64?,
+        verifiedArtifactBinding: Bool = false
+    ) -> Int? {
+        guard let configJSONData else { return nil }
+        let artifactBytes = weightsBytes.flatMap {
+            $0 > 0 && $0 <= UInt64(Int.max) ? Int($0) : nil
+        }
+        guard catalogMinRAMGB != nil || (verifiedArtifactBinding && artifactBytes != nil) else {
+            return nil
+        }
+        return AutotuneModelContextCap.pagedFitBatchDepth(
+            configData: configJSONData,
+            verifiedConfigSHA256: SHA256.hash(data: configJSONData).map { String(format: "%02x", $0) }.joined(),
+            hardwareMemoryGB: memoryGB,
+            catalogMinRAMGB: catalogMinRAMGB ?? 1,
+            contextTokens: contextTokens,
+            verifiedArtifactSizeBytes: artifactBytes
+        )
+    }
 }

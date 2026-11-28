@@ -763,7 +763,11 @@ struct ServeCommand: AsyncParsableCommand {
             maxContextTokensOverride: capacity.maxContextOverride,
             kvBitsOverride: config.kvBitsOverride,
             familyKVQuantDefault: true,
-            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(contextTokens: context),
+            pagedKVConfig: config.pagedKV.withFamilyDefaults(modelFamily: family ?? "").sizedToCover(
+                contextTokens: AutotuneModelContextCap.pagedPoolTokens(
+                    contextTokens: context, rows: capacity.maxBatch
+                )
+            ),
             prefillStepSize: config.prefillStepSize,
             prefillStepSizeExplicitlyConfigured: config.prefillStepSizeExplicitlyConfigured,
             maxBatch: capacity.maxBatch,
@@ -1278,6 +1282,18 @@ struct ServeCommand: AsyncParsableCommand {
         ).catalogTrust
     }
 
+    static func noJoinHonorsLabStaticFeed(
+        joiningCoordinator: Bool,
+        servesPoolModelEntry: Bool,
+        modelCatalogKey: String?,
+        labStaticFeedActive: Bool = StaticFeedOrigin.labOverride != nil
+    ) -> Bool {
+        !joiningCoordinator
+            && !servesPoolModelEntry
+            && labStaticFeedActive
+            && !(modelCatalogKey ?? "").isEmpty
+    }
+
     static func runModelArtifactPreflightOutcome(
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool = true,
@@ -1286,6 +1302,7 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false,
         shardStage: ShardStageScope? = nil,
+        labStaticFeedActive: Bool = StaticFeedOrigin.labOverride != nil,
         resolveNativeMTP: ((_ config: AppConfig, _ trust: CatalogRuntimeTrust, _ authorityPath: String, _ authoritySHA256: String) async -> NativeMTPAdmissionResolution)? = nil
     ) async throws -> ModelArtifactPreflightOutcome {
         // #1816: a configured pool_model_id must be well formed and never
@@ -1401,14 +1418,23 @@ struct ServeCommand: AsyncParsableCommand {
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         ))
-        // A `--no-join` serve with native MTP `auto` and a catalog key runs the
+        // A `--no-join` serve with native MTP `auto` (or with a lab-harness
+        // `MACPROVIDER_LAB_STATIC_FEED_*` override) and a catalog key runs the
         // same catalog preflight and signed admission resolve as a join, so a
-        // lab serve gets the release's admission set with every check kept.
-        // It never persists a config migration, mints no catalog trust (no
-        // coordinator, CB policy or hello changes), and on any failure or a
-        // non-admitted answer keeps the plain no-join binding below.
+        // lab serve gets the release's admission set (and, under a lab static
+        // feed override, its signed CB policy via `catalogTrust`) with every
+        // check kept. It never persists a config migration, never joins a
+        // coordinator, and without a lab static feed override mints no catalog
+        // trust.
+        let noJoinLabStaticFeed = !joinedCatalogPreflight
+            && Self.noJoinHonorsLabStaticFeed(
+                joiningCoordinator: joiningCoordinator,
+                servesPoolModelEntry: servesPoolModelEntry,
+                modelCatalogKey: resolved.modelCatalogKey,
+                labStaticFeedActive: labStaticFeedActive
+            )
         var noJoinNativeMTPPreflight = !joinedCatalogPreflight && !joiningCoordinator && !servesPoolModelEntry
-            && resolved.nativeMTPMode == .auto
+            && (resolved.nativeMTPMode == .auto || noJoinLabStaticFeed)
             && !(resolved.modelCatalogKey ?? "").isEmpty
         // The catalog preflight adopts a cache-backed or non-canonical path
         // into the durable store (a full snapshot copy). A no-join serve must
@@ -1457,18 +1483,22 @@ struct ServeCommand: AsyncParsableCommand {
                     artifactResolver: artifactResolver
                 )
                 let nativeMTPResolution: NativeMTPAdmissionResolution
-                if let resolveNativeMTP {
-                    nativeMTPResolution = await resolveNativeMTP(candidate, catalogTrust, canonicalAuthorityPath, actual)
+                if candidate.nativeMTPMode == .auto {
+                    if let resolveNativeMTP {
+                        nativeMTPResolution = await resolveNativeMTP(candidate, catalogTrust, canonicalAuthorityPath, actual)
+                    } else {
+                        nativeMTPResolution = await resolveNativeMTPAdmission(
+                            config: candidate,
+                            releaseID: catalogTrust.releaseID,
+                            catalogDigest: catalogTrust.digest,
+                            authorityPath: canonicalAuthorityPath,
+                            authoritySHA256: actual,
+                            staticInputs: staticInputs,
+                            artifactResolver: artifactResolver
+                        )
+                    }
                 } else {
-                    nativeMTPResolution = await resolveNativeMTPAdmission(
-                        config: candidate,
-                        releaseID: catalogTrust.releaseID,
-                        catalogDigest: catalogTrust.digest,
-                        authorityPath: canonicalAuthorityPath,
-                        authoritySHA256: actual,
-                        staticInputs: staticInputs,
-                        artifactResolver: artifactResolver
-                    )
+                    nativeMTPResolution = .noEntry
                 }
                 var nativeMTPResolvedAdmission: NativeMTPResolvedAdmission?
                 var nativeMTPAdmissionUnresolved = false
@@ -1477,13 +1507,17 @@ struct ServeCommand: AsyncParsableCommand {
                 case .noEntry: break
                 case .unavailable: nativeMTPAdmissionUnresolved = true
                 }
-                if noJoinNativeMTPPreflight && nativeMTPResolvedAdmission == nil {
+                if noJoinNativeMTPPreflight && !noJoinLabStaticFeed && nativeMTPResolvedAdmission == nil {
                     let reason = nativeMTPAdmissionUnresolved ? "admission_unavailable" : "no_admission_entry"
                     FileHandle.standardError.write(Data("native_mtp no-join: \(reason); serving with native MTP off\n".utf8))
                 } else {
+                    if noJoinLabStaticFeed && candidate.nativeMTPMode == .auto && nativeMTPResolvedAdmission == nil {
+                        let reason = nativeMTPAdmissionUnresolved ? "admission_unavailable" : "no_admission_entry"
+                        FileHandle.standardError.write(Data("native_mtp no-join: \(reason); serving with native MTP off\n".utf8))
+                    }
                     resolved = candidate
                     return ModelArtifactPreflightOutcome(
-                        catalogTrust: noJoinNativeMTPPreflight ? nil : catalogTrust,
+                        catalogTrust: (noJoinNativeMTPPreflight && !noJoinLabStaticFeed) ? nil : catalogTrust,
                         runtimeBinding: VerifiedModelRuntimeBinding(
                             authorityPath: canonicalAuthorityPath,
                             authoritySHA256: actual,
@@ -3289,6 +3323,9 @@ struct ServeCommand: AsyncParsableCommand {
         // swap applies only the target model's own ceiling (SPEC-038 FR-CB11).
         var rowsBeforePolicyCeiling: Int?
         var configuredSlotsForProvisional: Int?
+        var allowInklingContextRaise = false
+        let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+        let startupMetallibSHA256 = ModelRuntime.nativeMTPRuntimeMetallibSHA256()
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
             let configuredSlots = resolved.maxConcurrencyOverride
@@ -3297,13 +3334,41 @@ struct ServeCommand: AsyncParsableCommand {
                 maxContextOverride: resolved.maxContextOverride,
                 maxConcurrencyOverride: nil
             ).maxContextTokens
-            let memoryFitCap = AutoServedSlots.memoryFitSlots(
+            let chip = MachineFingerprinter().sample().chip
+            // The full-context fit is the baseline. The paged reservation may
+            // only raise it. `plan` applies the policy ceiling and the M1/M2
+            // cap, so the no-ceiling call still reports rows before it.
+            let fullContextFit = AutoServedSlots.memoryFitSlots(
                 configJSONData: servedConfigJSONData,
                 memoryGB: memoryGB,
                 catalogMinRAMGB: servedCatalogMinRAMGB,
                 contextTokens: servedContextTokens,
                 weightsBytes: servedWeightsBytes,
                 verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
+            )
+            let pagedFit = AutoServedSlots.pagedFitSlots(
+                configJSONData: servedConfigJSONData,
+                memoryGB: memoryGB,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                contextTokens: servedContextTokens,
+                weightsBytes: servedWeightsBytes,
+                verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
+            )
+            let startupFamily = ModelRuntime.pagedKVModelCapabilities(
+                modelID: resolved.model,
+                configJSONData: servedConfigJSONData
+            ).modelFamily
+            let withheld = continuousBatchingPolicy.status == .liveVerified
+                && continuousBatchingPolicy.selection.revokesRunningBuild(
+                    modelSHA256: startupLoadSHA256,
+                    modelFamily: startupFamily,
+                    metallibSHA256: startupMetallibSHA256
+                )
+            let plannedRows = AutotuneModelContextCap.plannedRowCount(
+                tierConstant: AutotuneRecommendHardware.tierBatch(chip: chip, memoryGB: memoryGB),
+                pagedFit: pagedFit,
+                fullContextFit: fullContextFit,
+                withheld: withheld
             )
             let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
                 continuousBatchingPolicy,
@@ -3321,18 +3386,23 @@ struct ServeCommand: AsyncParsableCommand {
                 ),
                 recommendedSlots: {
                     AutoServedSlots.recommendedSlots(
-                        chip: MachineFingerprinter().sample().chip,
+                        chip: chip,
                         memoryGB: memoryGB,
-                        memoryFitCap: memoryFitCap
+                        memoryFitCap: plannedRows
                     )
                 },
-                memoryFitKnown: memoryFitCap != nil,
+                memoryFitKnown: pagedFit != nil,
                 policyCeiling: ceiling
             ) }
             let plan = planInputs(policyCeiling)
             rowsBeforePolicyCeiling = policyCeiling == nil ? plan.rows : planInputs(nil).rows
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
+            allowInklingContextRaise = !withheld
+                && policyCeiling != 1
+                && plan.ownerPinned == nil
+                && plan.reason != "draft_model"
+                && plan.reason != "emergency_off"
             FileHandle.standardError.write(Data(
                 "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune") policy_ceiling=\(policyCeiling.map(String.init) ?? "none")\n".utf8
             ))
@@ -3360,17 +3430,15 @@ struct ServeCommand: AsyncParsableCommand {
         // #1689 FR-20b: a recommendation-generated context is recomputed for
         // each verified switch target from the same verified config.json.
         let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+        let switchChip = MachineFingerprinter().sample().chip
         var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
         // SPEC-001-R019: each verified target's signed catalog key, for a
         // further warm member's own native-MTP admission.
         var memberCatalogKeys: [String: String] = [:]
-        // Switch targets start from the rows planned before the startup
-        // model's signed ceiling; each target's own memory fit and ceiling
-        // (applied at the swap) bound it (SPEC-038 FR-CB11 v0.3.22).
-        let switchBaselineSlots = max(
-            ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
-            rowsBeforePolicyCeiling ?? 0
-        )
+        // Each verified switch target gets its own planned rows. The startup
+        // model's signed ceiling does not travel with the switch (SPEC-038
+        // FR-CB11 v0.3.22). One row keeps that target's context; further rows
+        // reserve the 4,000-token floor.
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
             artifactResolver: targetResolver,
@@ -3379,17 +3447,55 @@ struct ServeCommand: AsyncParsableCommand {
                     for id in ids { memberCatalogKeys[id] = key; memberCatalogKeys[id.lowercased(with: nil)] = key }
                 }
                 guard resolved.maxContextSource == .recommendationApply else { return }
-                let knobs = ModelSwitchContext.recomputedServeKnobs(
+                let targetKeys = Set(ids)
+                let targetCeiling = AutoServedSlots.policyServedSlotCeiling(
+                    continuousBatchingPolicy,
+                    modelKeys: targetKeys
+                )
+                let weights = artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
+                let draft = ProviderCapacity.servedDraftModel(configured: resolved.draftModel)
+                let targetFamily = ModelRuntime.pagedKVModelCapabilities(
+                    modelID: row.modelID,
+                    configJSONData: artifact.configJSONData
+                ).modelFamily
+                let targetWithheld = continuousBatchingPolicy.status == .liveVerified
+                    && continuousBatchingPolicy.selection.revokesRunningBuild(
+                        modelSHA256: artifact.sha256,
+                        modelFamily: targetFamily,
+                        metallibSHA256: startupMetallibSHA256
+                    )
+                if resolved.maxConcurrencySource == .owner {
+                    let pin = max(
+                        1,
+                        autoServedSlots?.ownerPinned
+                            ?? ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlotsForProvisional)
+                    )
+                    let slots = targetWithheld ? 1 : min(pin, ProviderCapacity.boundedServingRows(targetCeiling ?? Int.max))
+                    let knobs = ModelSwitchContext.recomputedServeKnobs(
+                        memoryGB: switchMemoryGB,
+                        modelID: row.modelID,
+                        catalogMinRAMGB: row.minRAMGB,
+                        configJSONData: artifact.configJSONData,
+                        configSHA256: artifact.configSHA256,
+                        draftModel: draft,
+                        slots: slots,
+                        modelWeightSizeBytes: weights
+                    )
+                    switchTargets.append((ids, knobs.context, knobs.slots))
+                    return
+                }
+                let knobs = ModelSwitchContext.pagedSwitchKnobs(
+                    chip: switchChip,
                     memoryGB: switchMemoryGB,
                     modelID: row.modelID,
                     catalogMinRAMGB: row.minRAMGB,
                     configJSONData: artifact.configJSONData,
                     configSHA256: artifact.configSHA256,
-                    draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
-                    // The slot count this serve runs (`maxBatch` below), before
-                    // the startup model's policy ceiling.
-                    slots: switchBaselineSlots,
-                    modelWeightSizeBytes: artifact.sizeBytes > 0 ? UInt64(artifact.sizeBytes) : nil
+                    draftModel: draft,
+                    modelWeightSizeBytes: weights,
+                    policyCeiling: targetCeiling,
+                    withheld: targetWithheld,
+                    emergencyOff: emergencyOffOverride
                 )
                 switchTargets.append((ids, knobs.context, knobs.slots))
             }
@@ -3398,14 +3504,27 @@ struct ServeCommand: AsyncParsableCommand {
         // count this serve runs (config, environment, or --max-batch) would
         // not fit memory at it; an operator value is kept (status warns).
         let servedSlots = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
-        let startupBound = ModelSwitchContext.startupBoundedContext(
-            config: resolved,
-            slots: servedSlots,
-            memoryGB: switchMemoryGB,
-            configJSONData: servedConfigJSONData,
-            catalogMinRAMGB: servedCatalogMinRAMGB,
-            modelWeightSizeBytes: servedWeightsBytes
-        )
+        // An owner pin still shrinks context so that many full contexts fit.
+        // An autotune-derived count uses the paged reservation, so raising
+        // the row count does not collapse the served context.
+        let startupBound = resolved.maxConcurrencySource == .owner
+            ? ModelSwitchContext.startupBoundedContext(
+                config: resolved,
+                slots: servedSlots,
+                memoryGB: switchMemoryGB,
+                configJSONData: servedConfigJSONData,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                modelWeightSizeBytes: servedWeightsBytes
+            )
+            : ModelSwitchContext.pagedStartupBound(
+                config: resolved,
+                slots: servedSlots,
+                memoryGB: switchMemoryGB,
+                configJSONData: servedConfigJSONData,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                modelWeightSizeBytes: servedWeightsBytes,
+                allowInklingRaise: allowInklingContextRaise
+            )
         let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
             config: resolved,
             configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
@@ -3424,14 +3543,20 @@ struct ServeCommand: AsyncParsableCommand {
             targets: switchTargets.map { ($0.ids, $0.recomputed) }
         )
         if let startupBound, let configured = resolved.maxContextOverride {
-            if startupBound.slots < servedSlots {
+            if startupBound.slots != servedSlots {
+                resolved.maxConcurrencyOverride = startupBound.slots
+            }
+            if startupBound.slots > servedSlots {
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; serving \(startupBound.context) tokens with \(startupBound.slots) slots so the paged reservation fits\n".utf8
+                ))
+            } else if startupBound.slots < servedSlots {
                 // SPEC-023-R018 item 9: even the minimum context does not fit
                 // the configured slots, so serve runs fewer rather than an
                 // over-envelope pair.
                 FileHandle.standardError.write(Data(
                     "max_context_override \(configured) was generated by a recommendation; even the \(AutotuneModelContextCap.minimumServeContext)-token minimum context does not fit \(servedSlots) slots in memory, so serving \(startupBound.context) tokens with \(startupBound.slots) slots\n".utf8
                 ))
-                resolved.maxConcurrencyOverride = startupBound.slots
             } else {
                 FileHandle.standardError.write(Data(
                     "max_context_override \(configured) was generated by a recommendation; lowered to \(startupBound.context) tokens so \(servedSlots) slots fit in memory\n".utf8
@@ -3449,12 +3574,27 @@ struct ServeCommand: AsyncParsableCommand {
         let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
         let smallMRouteVerdictStore = SmallMRouteVerdictStore(selfCheckStore: cbSelfCheckStore)
         let startupLoadPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model
-        let startupLoadSHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
         // The paged-KV pool the MLX runtime is built with; it bounds the
-        // FR-CB10 exactness probe, so the startup identity keys it.
+        // FR-CB10 exactness probe, so the startup identity keys it. The cap
+        // covers the rows this process promises, including each warm-switch
+        // target, so a row cannot fail after output has started.
         let localModelFamily = startupLoadPath.flatMap(ModelRuntime.localModelFamily)
+        let finalContextTokens = ProviderCapacity(
+            maxContextOverride: resolved.maxContextOverride,
+            maxConcurrencyOverride: nil
+        ).maxContextTokens
+        let finalRows = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+        var poolTokens = AutotuneModelContextCap.pagedPoolTokens(
+            contextTokens: finalContextTokens, rows: finalRows
+        )
+        for target in switchTargets {
+            poolTokens = max(
+                poolTokens,
+                AutotuneModelContextCap.pagedPoolTokens(contextTokens: target.recomputed, rows: target.slots)
+            )
+        }
         let startupPagedKVConfig = resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
-            contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
+            contextTokens: poolTokens
         )
         let smallMRouteStartupIdentity: String? = startupLoadSHA256.flatMap { sha in
             guard !sha.isEmpty, autoServedSlots != nil else { return nil }
@@ -3798,12 +3938,16 @@ struct ServeCommand: AsyncParsableCommand {
                 )
             }
             // A startup memory bound below the planned rows still applies to
-            // the swap baseline; the startup model's ceiling does not.
+            // the swap baseline; a startup Inkling raise (1 -> 2) lifts the
+            // baseline too, while the startup model's ceiling never travels.
+            let effectiveRowsBeforeCeiling: Int? = rows < plan.rows
+                ? rows
+                : (rows > plan.rows ? rowsBeforePolicyCeiling.map { max($0, rows) } ?? rows : rowsBeforePolicyCeiling)
             await mlxRuntime.configureServedSlots(
                 managed: plan.selfChecked,
                 ownerPinned: ownerPinned,
                 resolver: plan.selfChecked ? resolver : nil,
-                rowsBeforePolicyCeiling: rows < plan.rows ? rows : rowsBeforePolicyCeiling
+                rowsBeforePolicyCeiling: effectiveRowsBeforeCeiling
             )
             if plan.selfChecked,
                let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),
