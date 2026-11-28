@@ -94,6 +94,39 @@ final class StaticFeedOriginTests: XCTestCase {
         }
     }
 
+    func testNoJoinHonorsLabStaticFeedOnlyWhenOverrideIsActive() {
+        XCTAssertTrue(ServeCommand.noJoinHonorsLabStaticFeed(
+            joiningCoordinator: false,
+            servesPoolModelEntry: false,
+            modelCatalogKey: "thinkingmachines/inkling-2-mini",
+            labStaticFeedActive: true
+        ))
+        XCTAssertFalse(ServeCommand.noJoinHonorsLabStaticFeed(
+            joiningCoordinator: false,
+            servesPoolModelEntry: false,
+            modelCatalogKey: "thinkingmachines/inkling-2-mini",
+            labStaticFeedActive: false
+        ))
+        XCTAssertFalse(ServeCommand.noJoinHonorsLabStaticFeed(
+            joiningCoordinator: true,
+            servesPoolModelEntry: false,
+            modelCatalogKey: "thinkingmachines/inkling-2-mini",
+            labStaticFeedActive: true
+        ))
+        XCTAssertFalse(ServeCommand.noJoinHonorsLabStaticFeed(
+            joiningCoordinator: false,
+            servesPoolModelEntry: true,
+            modelCatalogKey: "thinkingmachines/inkling-2-mini",
+            labStaticFeedActive: true
+        ))
+        XCTAssertFalse(ServeCommand.noJoinHonorsLabStaticFeed(
+            joiningCoordinator: false,
+            servesPoolModelEntry: false,
+            modelCatalogKey: "",
+            labStaticFeedActive: true
+        ))
+    }
+
     func testWithoutAnOverrideEveryFeedUsesTheProductionOriginOverHTTPS() throws {
         XCTAssertNil(StaticFeedOrigin.labOverride, "the test process sets no lab override")
         XCTAssertEqual(StaticFeedOrigin.base, StaticFeedOrigin.production)

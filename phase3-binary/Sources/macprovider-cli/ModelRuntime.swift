@@ -3870,11 +3870,17 @@ maxTokens: 1,
         }
     }
 
-    nonisolated static func pagedKVRuntimeCacheClass(model: any LanguageModel, baseParameters: GenerateParameters) throws -> String {
-        let caches = try model.newCache(parameters: baseParameters)
-        guard let first = caches.first else { return "empty" }
+    nonisolated static func pagedKVRuntimeCacheClass(caches: [KVCache]) -> String {
+        // Inkling 2 builds a per-visit `CacheList(attention, ConvolutionTailCache)`
+        // for every layer visit, so unflattened `caches` looks uniformly like
+        // `"CacheList"`. Unwrap only verified Inkling visit lists into their
+        // heterogeneous attention + convolution-tail leaves so Inkling classifies
+        // as `"mixed"` (matching SPEC-023's closed CB policy `cache_class` enum)
+        // while any non-visit `CacheList` stays `"CacheList"` and fails closed.
+        let effective = PagedKVInkling2Layout.flattened(caches)
+        guard let first = effective.first else { return "empty" }
         let firstClass = String(describing: type(of: first))
-        guard caches.allSatisfy({ String(describing: type(of: $0)) == firstClass }) else {
+        guard effective.allSatisfy({ String(describing: type(of: $0)) == firstClass }) else {
             return "mixed"
         }
         // MiniMax M3 sparse layers keep attention K/V plus indexer keys, a
@@ -3883,6 +3889,10 @@ maxTokens: 1,
         // policy's `cache_class` to `KVCacheSimple` and `mixed`).
         if first is MiniMaxM3Cache { return "mixed" }
         return firstClass
+    }
+
+    nonisolated static func pagedKVRuntimeCacheClass(model: any LanguageModel, baseParameters: GenerateParameters) throws -> String {
+        pagedKVRuntimeCacheClass(caches: try model.newCache(parameters: baseParameters))
     }
 
     private nonisolated static func pagedKVCacheKinds(

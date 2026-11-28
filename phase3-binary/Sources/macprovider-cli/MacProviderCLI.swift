@@ -1282,6 +1282,18 @@ struct ServeCommand: AsyncParsableCommand {
         ).catalogTrust
     }
 
+    static func noJoinHonorsLabStaticFeed(
+        joiningCoordinator: Bool,
+        servesPoolModelEntry: Bool,
+        modelCatalogKey: String?,
+        labStaticFeedActive: Bool = StaticFeedOrigin.labOverride != nil
+    ) -> Bool {
+        !joiningCoordinator
+            && !servesPoolModelEntry
+            && labStaticFeedActive
+            && !(modelCatalogKey ?? "").isEmpty
+    }
+
     static func runModelArtifactPreflightOutcome(
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool = true,
@@ -1290,6 +1302,7 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false,
         shardStage: ShardStageScope? = nil,
+        labStaticFeedActive: Bool = StaticFeedOrigin.labOverride != nil,
         resolveNativeMTP: ((_ config: AppConfig, _ trust: CatalogRuntimeTrust, _ authorityPath: String, _ authoritySHA256: String) async -> NativeMTPAdmissionResolution)? = nil
     ) async throws -> ModelArtifactPreflightOutcome {
         // #1816: a configured pool_model_id must be well formed and never
@@ -1405,14 +1418,23 @@ struct ServeCommand: AsyncParsableCommand {
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         ))
-        // A `--no-join` serve with native MTP `auto` and a catalog key runs the
+        // A `--no-join` serve with native MTP `auto` (or with a lab-harness
+        // `MACPROVIDER_LAB_STATIC_FEED_*` override) and a catalog key runs the
         // same catalog preflight and signed admission resolve as a join, so a
-        // lab serve gets the release's admission set with every check kept.
-        // It never persists a config migration, mints no catalog trust (no
-        // coordinator, CB policy or hello changes), and on any failure or a
-        // non-admitted answer keeps the plain no-join binding below.
+        // lab serve gets the release's admission set (and, under a lab static
+        // feed override, its signed CB policy via `catalogTrust`) with every
+        // check kept. It never persists a config migration, never joins a
+        // coordinator, and without a lab static feed override mints no catalog
+        // trust.
+        let noJoinLabStaticFeed = !joinedCatalogPreflight
+            && Self.noJoinHonorsLabStaticFeed(
+                joiningCoordinator: joiningCoordinator,
+                servesPoolModelEntry: servesPoolModelEntry,
+                modelCatalogKey: resolved.modelCatalogKey,
+                labStaticFeedActive: labStaticFeedActive
+            )
         var noJoinNativeMTPPreflight = !joinedCatalogPreflight && !joiningCoordinator && !servesPoolModelEntry
-            && resolved.nativeMTPMode == .auto
+            && (resolved.nativeMTPMode == .auto || noJoinLabStaticFeed)
             && !(resolved.modelCatalogKey ?? "").isEmpty
         // The catalog preflight adopts a cache-backed or non-canonical path
         // into the durable store (a full snapshot copy). A no-join serve must
@@ -1461,18 +1483,22 @@ struct ServeCommand: AsyncParsableCommand {
                     artifactResolver: artifactResolver
                 )
                 let nativeMTPResolution: NativeMTPAdmissionResolution
-                if let resolveNativeMTP {
-                    nativeMTPResolution = await resolveNativeMTP(candidate, catalogTrust, canonicalAuthorityPath, actual)
+                if candidate.nativeMTPMode == .auto {
+                    if let resolveNativeMTP {
+                        nativeMTPResolution = await resolveNativeMTP(candidate, catalogTrust, canonicalAuthorityPath, actual)
+                    } else {
+                        nativeMTPResolution = await resolveNativeMTPAdmission(
+                            config: candidate,
+                            releaseID: catalogTrust.releaseID,
+                            catalogDigest: catalogTrust.digest,
+                            authorityPath: canonicalAuthorityPath,
+                            authoritySHA256: actual,
+                            staticInputs: staticInputs,
+                            artifactResolver: artifactResolver
+                        )
+                    }
                 } else {
-                    nativeMTPResolution = await resolveNativeMTPAdmission(
-                        config: candidate,
-                        releaseID: catalogTrust.releaseID,
-                        catalogDigest: catalogTrust.digest,
-                        authorityPath: canonicalAuthorityPath,
-                        authoritySHA256: actual,
-                        staticInputs: staticInputs,
-                        artifactResolver: artifactResolver
-                    )
+                    nativeMTPResolution = .noEntry
                 }
                 var nativeMTPResolvedAdmission: NativeMTPResolvedAdmission?
                 var nativeMTPAdmissionUnresolved = false
@@ -1481,13 +1507,17 @@ struct ServeCommand: AsyncParsableCommand {
                 case .noEntry: break
                 case .unavailable: nativeMTPAdmissionUnresolved = true
                 }
-                if noJoinNativeMTPPreflight && nativeMTPResolvedAdmission == nil {
+                if noJoinNativeMTPPreflight && !noJoinLabStaticFeed && nativeMTPResolvedAdmission == nil {
                     let reason = nativeMTPAdmissionUnresolved ? "admission_unavailable" : "no_admission_entry"
                     FileHandle.standardError.write(Data("native_mtp no-join: \(reason); serving with native MTP off\n".utf8))
                 } else {
+                    if noJoinLabStaticFeed && candidate.nativeMTPMode == .auto && nativeMTPResolvedAdmission == nil {
+                        let reason = nativeMTPAdmissionUnresolved ? "admission_unavailable" : "no_admission_entry"
+                        FileHandle.standardError.write(Data("native_mtp no-join: \(reason); serving with native MTP off\n".utf8))
+                    }
                     resolved = candidate
                     return ModelArtifactPreflightOutcome(
-                        catalogTrust: noJoinNativeMTPPreflight ? nil : catalogTrust,
+                        catalogTrust: (noJoinNativeMTPPreflight && !noJoinLabStaticFeed) ? nil : catalogTrust,
                         runtimeBinding: VerifiedModelRuntimeBinding(
                             authorityPath: canonicalAuthorityPath,
                             authoritySHA256: actual,
