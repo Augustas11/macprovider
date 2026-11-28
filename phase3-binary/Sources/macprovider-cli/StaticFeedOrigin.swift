@@ -71,6 +71,14 @@ func readLabStaticFeedOverride(_ environment: [String: String]) -> LabStaticFeed
         ))
         return nil
     }
+    guard !AutotuneStaticInputs.generatedTrustedPublicKeys.keys.contains(keyID),
+          !AutotuneStaticInputs.generatedTrustedPublicKeys.values.contains(publicKey)
+    else {
+        FileHandle.standardError.write(Data(
+            "event=lab_static_feed_override action=ignored reason=production_key_conflict\n".utf8
+        ))
+        return nil
+    }
     var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
     components?.path = ""
     guard let normalized = components?.url else { return nil }

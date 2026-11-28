@@ -132,6 +132,38 @@ final class NativeMTPInkling2ObservationTests: XCTestCase {
         }
     }
 
+    func testModelsNativeMTPIdentityInspectsInklingSnapshot() throws {
+        try withDirectory(config: config(), target: targetTensors(), draft: draftTensors()) { directory in
+            let tokenizerBytes = Data(#"{"version":"1.0","model":{}}"#.utf8)
+            let tokenizerConfigBytes = Data(#"{"chat_template":"{{ messages }}"}"#.utf8)
+            try tokenizerBytes.write(to: directory.appendingPathComponent("tokenizer.json"))
+            try tokenizerConfigBytes.write(to: directory.appendingPathComponent("tokenizer_config.json"))
+
+            let pair = try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)
+            let expectedRep = try NativeMTPArtifactObserver.inkling2DSparkRepresentation(for: pair)
+            let configBytes = try Data(contentsOf: directory.appendingPathComponent("config.json"))
+
+            let identity = try ModelsNativeMTPIdentity.inspect(modelDirectory: directory)
+            XCTAssertTrue(identity.embedded)
+            XCTAssertEqual(identity.mtpHeadCount, 3)
+            XCTAssertEqual(identity.quantizationKind, "mlx_oq4e")
+            XCTAssertEqual(identity.blockSizeElements, 64)
+            XCTAssertEqual(identity.representationManifestSHA256, expectedRep.manifestSHA256)
+            XCTAssertEqual(identity.tokenizerSHA256, Self.sha256Hex(tokenizerBytes))
+            XCTAssertEqual(identity.mtpManifestSHA256, Self.sha256Hex(configBytes))
+            XCTAssertNotNil(identity.cbTokenizerSHA256)
+            XCTAssertNotNil(identity.chatTemplateSHA256)
+            XCTAssertNotNil(identity.artifactHash)
+            XCTAssertEqual(identity.decodePathDigest, DecodePathIdentity.digest)
+
+            let json = identity.jsonObject
+            XCTAssertEqual(json["schema"] as? String, ModelsNativeMTPIdentity.schemaVersion)
+            let quant = try XCTUnwrap(json["quantization"] as? [String: Any])
+            XCTAssertEqual(quant["kind"] as? String, "mlx_oq4e")
+            XCTAssertEqual(quant["representation_manifest_sha256"] as? String, expectedRep.manifestSHA256)
+        }
+    }
+
     func testRepresentationBindsTheQuantizationObject() throws {
         func digest(_ edit: @escaping (inout [String: Any]) -> Void) throws -> String {
             var result = ""

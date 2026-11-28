@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
@@ -1242,4 +1243,188 @@ func printDiagnosticsJSON(_ object: [String: Any]) throws {
 
 func writeDiagnosticsStderr(_ line: String) {
     FileHandle.standardError.write(Data((line + "\n").utf8))
+}
+
+// MARK: - models native-mtp-identity
+
+/// Local snapshot native-MTP identity observed through the exact Swift
+/// `NativeMTPArtifactObserver` and hash rules used at serving admission time.
+struct ModelsNativeMTPIdentity: Equatable {
+    static let schemaVersion = "macprovider.models-native-mtp-identity.v1"
+
+    let embedded: Bool
+    let mtpHeadCount: Int
+    let artifactHash: String?
+    let tokenizerSHA256: String
+    let mtpManifestSHA256: String
+    let cbTokenizerSHA256: String?
+    let chatTemplateSHA256: String?
+    let decodePathDigest: String
+    let metallibSHA256: String?
+    let hardwareClass: String
+    let ramBytes: Int64
+    let quantizationKind: String
+    let blockSizeElements: Int?
+    let representationManifestSHA256: String
+    let perLayerExceptions: [String]
+    let unquantizedExceptions: [String]
+
+    static func inspect(
+        modelDirectory: URL,
+        mtpDirectory: URL? = nil,
+        includeArtifactHash: Bool = true
+    ) throws -> ModelsNativeMTPIdentity {
+        let targetURL = modelDirectory.standardizedFileURL
+        let mtpURL = mtpDirectory?.standardizedFileURL
+        let observation: NativeMTPArtifactPairObservation
+        if let mtpURL {
+            observation = try NativeMTPArtifactObserver.observePair(
+                targetDirectory: targetURL,
+                mtpDirectory: mtpURL
+            )
+        } else {
+            observation = try NativeMTPArtifactObserver.observeEmbedded(
+                targetDirectory: targetURL
+            )
+        }
+        let kind: String
+        let representation: NativeMTPAffineRepresentation
+        switch observation.target.format {
+        case .mlxOQ4e:
+            kind = "mlx_oq4e"
+            representation = try NativeMTPArtifactObserver.inkling2DSparkRepresentation(for: observation)
+        case .mlxMXFP4MXFP8:
+            kind = "mlx_mxfp4_mxfp8"
+            representation = try NativeMTPArtifactObserver.mixedMXRepresentation(for: observation)
+        case .mlxAffine4:
+            kind = "mlx_affine"
+            representation = try NativeMTPArtifactObserver.affineRepresentation(for: observation)
+        case .unquantized:
+            kind = "base"
+            representation = try NativeMTPArtifactObserver.baseRepresentation(for: observation)
+        case .mlxMXFP8:
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx_mxfp8 representation unsupported")
+        }
+        let tokenizerURL = targetURL.appendingPathComponent("tokenizer.json")
+        guard FileManager.default.fileExists(atPath: tokenizerURL.path) else {
+            throw ValidationError("missing tokenizer.json in \(targetURL.path)")
+        }
+        let tokenizerData = try Data(contentsOf: tokenizerURL, options: [.mappedIfSafe])
+        let tokenizerSHA256 = SHA256.hash(data: tokenizerData).map { String(format: "%02x", $0) }.joined()
+
+        let manifestDir = mtpURL ?? targetURL
+        let manifestURL = manifestDir.appendingPathComponent("config.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            throw ValidationError("missing config.json in \(manifestDir.path)")
+        }
+        let manifestData = try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
+        let mtpManifestSHA256 = SHA256.hash(data: manifestData).map { String(format: "%02x", $0) }.joined()
+
+        let cbTokenizer = ModelRuntime.tokenizerIdentityHashes(in: targetURL)
+        let artifactHash: String? = includeArtifactHash
+            ? (try? ModelArtifactVerifier.inspectCanonicalArtifact(directory: targetURL).sha256)
+            : nil
+        let chip = MachineFingerprinter().sample().chip
+        return ModelsNativeMTPIdentity(
+            embedded: observation.embedded,
+            mtpHeadCount: observation.target.mtpPredictionLayerCount,
+            artifactHash: artifactHash,
+            tokenizerSHA256: tokenizerSHA256,
+            mtpManifestSHA256: mtpManifestSHA256,
+            cbTokenizerSHA256: cbTokenizer.config,
+            chatTemplateSHA256: cbTokenizer.template,
+            decodePathDigest: DecodePathIdentity.digest,
+            metallibSHA256: ModelRuntime.nativeMTPRuntimeMetallibSHA256(),
+            hardwareClass: NativeMTPAdmissionSidecar.canonicalHardwareClass(chip),
+            ramBytes: Int64(ProcessInfo.processInfo.physicalMemory),
+            quantizationKind: kind,
+            blockSizeElements: kind == "base" ? nil : representation.groupSize,
+            representationManifestSHA256: representation.manifestSHA256,
+            perLayerExceptions: representation.perLayerExceptions,
+            unquantizedExceptions: representation.unquantizedExceptions
+        )
+    }
+
+    var jsonObject: [String: Any] {
+        func nullable(_ value: Any?) -> Any { value ?? NSNull() }
+        return [
+            "schema": Self.schemaVersion,
+            "embedded": embedded,
+            "mtp_head_count": mtpHeadCount,
+            "artifact_hash": nullable(artifactHash),
+            "tokenizer_sha256": tokenizerSHA256,
+            "mtp_manifest_sha256": mtpManifestSHA256,
+            "cb_tokenizer_sha256": nullable(cbTokenizerSHA256),
+            "chat_template_sha256": nullable(chatTemplateSHA256),
+            "decode_path_digest": decodePathDigest,
+            "metallib_sha256": nullable(metallibSHA256),
+            "hardware_class": hardwareClass,
+            "ram_bytes": ramBytes,
+            "quantization": [
+                "kind": quantizationKind,
+                "block_size_elements": nullable(blockSizeElements),
+                "representation_manifest_sha256": representationManifestSHA256,
+                "per_layer_exceptions": perLayerExceptions,
+                "unquantized_exceptions": unquantizedExceptions,
+            ],
+        ]
+    }
+
+    var humanText: String {
+        [
+            "embedded=\(embedded)",
+            "mtp_head_count=\(mtpHeadCount)",
+            "artifact_hash=\(artifactHash ?? "unavailable")",
+            "tokenizer_sha256=\(tokenizerSHA256)",
+            "mtp_manifest_sha256=\(mtpManifestSHA256)",
+            "cb_tokenizer_sha256=\(cbTokenizerSHA256 ?? "unavailable")",
+            "chat_template_sha256=\(chatTemplateSHA256 ?? "unavailable")",
+            "decode_path_digest=\(decodePathDigest)",
+            "metallib_sha256=\(metallibSHA256 ?? "unavailable")",
+            "hardware_class=\(hardwareClass)",
+            "ram_bytes=\(ramBytes)",
+            "quantization.kind=\(quantizationKind)",
+            "quantization.representation_manifest_sha256=\(representationManifestSHA256)",
+        ].joined(separator: "\n")
+    }
+}
+
+struct ModelsNativeMTPIdentityCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "native-mtp-identity",
+        abstract: "Inspect a local model snapshot and print its native-MTP representation, tokenizer, and manifest digests."
+    )
+
+    @Option(name: .customLong("model-dir"), help: "Path to the local target model snapshot directory.")
+    var modelDir: String
+
+    @Option(name: .customLong("mtp-dir"), help: "Optional path to a separate MTP drafter directory (omit for embedded checkpoint_mtp layouts).")
+    var mtpDir: String?
+
+    @Flag(name: .customLong("skip-artifact-hash"), help: "Skip hashing safetensors payloads for artifact_hash.")
+    var skipArtifactHash = false
+
+    @Flag(name: .customLong("json"), help: "Emit the macprovider.models-native-mtp-identity.v1 JSON object.")
+    var emitJSON = false
+
+    func run() async throws {
+        let modelURL = URL(fileURLWithPath: ConfigLoader.expandTilde(modelDir)).standardizedFileURL
+        let mtpURL = mtpDir.map { URL(fileURLWithPath: ConfigLoader.expandTilde($0)).standardizedFileURL }
+        let identity: ModelsNativeMTPIdentity
+        do {
+            identity = try ModelsNativeMTPIdentity.inspect(
+                modelDirectory: modelURL,
+                mtpDirectory: mtpURL,
+                includeArtifactHash: !skipArtifactHash
+            )
+        } catch {
+            writeDiagnosticsStderr("models native-mtp-identity failed: \(error)")
+            throw ExitCode(2)
+        }
+        if emitJSON {
+            try printDiagnosticsJSON(identity.jsonObject)
+        } else {
+            print(identity.humanText)
+        }
+    }
 }
