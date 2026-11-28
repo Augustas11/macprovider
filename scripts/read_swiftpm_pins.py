@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at 52ae025c the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at cde15ff7 (``SPEC048_MLX_CORE_REVISION``),
+mlx-swift fork revision pins it: at be169924 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at 4ff2db41 (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,26 +42,31 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.33.0-macprovider.92 (#2505) on 3.33.0-macprovider.91: Inkling 2 continuous
-# batching: each batched row attends through the model's own one-row attention
-# over its paged cache, and batched one-token rows route experts, take the
-# one-row projection spans and the close-gap verify head as they do alone, so
-# CB rows match serial greedy tokens; no other model's code changes.
-SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.92"
-SPEC048_MLX_SWIFT_LM_REVISION = "1ed7853d27698b037d582aa2f00fc827ae4cca84"
+# 3.33.0-macprovider.94 on 3.33.0-macprovider.92: 3.33.0-macprovider.92 with
+# only the mlx-swift pin moved to be16992 (0.33.0-macprovider.29 on MLX core
+# 4ff2db419, the fork stack merged with upstream mlx v0.32.5 with small-M
+# routes 1 and 2 unchanged, mlx-c 715780d); no model source changes.
+SPEC048_MLX_SWIFT_LM_TAG = "3.33.0-macprovider.94"
+SPEC048_MLX_SWIFT_LM_REVISION = "0d9aaeeba002d8e814cdf0661d74dfbf3ef5294d"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "ca661dc6885f8603e911746838b60d312439a368"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.28"
-# Fork tag 0.33.0-macprovider.28 (engine-333): the fork patch stack rebased onto
+SPEC048_MLX_SWIFT_TAG = "0.33.0-macprovider.29"
+# Fork tag 0.33.0-macprovider.29 (mlx v0.32.5 sync): 0.33.0-macprovider.28 (52ae025c) with
+# Source/Cmlx/mlx at 4ff2db419 (the fork core merged with upstream mlx v0.32.5),
+# Source/Cmlx/mlx-c at 715780d and the generated sources regenerated from them.
+# .28 (engine-333): the fork patch stack rebased onto
 # upstream mlx-swift 0.33.0 plus mlx-swift PR 522; its Source/Cmlx/mlx gitlink
 # is cde15ff75 and Source/Cmlx/mlx-c is 33d88bf. Prior: 0.32.3-macprovider.27
 # (e7243b3d, #2451) is .26 (aaa82655) plus the dense qmm_t 64-row tile gitlink
 # and the QmmTileTests bit-identity test; .26 (#2462) added the per-op small-M
 # route (SmallMRoute, withSmallMRoute). The tag is cut from this revision at
 # merge.
-SPEC048_MLX_SWIFT_REVISION = "52ae025cbfac595328bd7fad23c8bce560bbe57c"
+SPEC048_MLX_SWIFT_REVISION = "be169924bed0b9956125eeab3c9c1eb8b9cb8f6b"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "7ede4fd6d05f63305c1c0ebf4f8c1909a637c574"
-# Fork tag v0.32.4-macprovider.18 (engine-333): v0.32.4-macprovider.17
+# Fork tag v0.32.5-macprovider.1 (mlx v0.32.5 sync): a merge of upstream mlx v0.32.5
+# into v0.32.4-macprovider.18 (cde15ff75); small-M routes 1 and 2 keep the fork
+# kernels and logic, route 0 is upstream v0.32.5 routing.
+# v0.32.4-macprovider.18 (engine-333): v0.32.4-macprovider.17
 # (6c2ac790) plus cherry-picks of ml-explore/mlx #4883, #4881 and #4930.
 # .17 (#2451) is v0.32.4-macprovider.16 (dd68f1d2) plus one commit: dense qmm_t
 # takes a 64-row tile from 1024 rows for affine bfloat16 group-64 weights. .16 (#2462) is v0.32.4-macprovider.15 (4e9a71dc)
@@ -77,10 +82,12 @@ SPEC048_MLX_SWIFT_UPSTREAM_BASE = "7ede4fd6d05f63305c1c0ebf4f8c1909a637c574"
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.18"
-SPEC048_MLX_CORE_REVISION = "cde15ff75e719a47677d7953657ee319ba50deee"
-SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
+SPEC048_MLX_CORE_TAG = "v0.32.5-macprovider.1"
+SPEC048_MLX_CORE_REVISION = "4ff2db41971adef65d6e817637f4b6dbdf719ef9"
+SPEC048_MLX_CORE_UPSTREAM_BASE = "cfc675e9e59cb6ee29a647cf8fe87ef844eff879"
 # The separate C symbol preserves the existing quantized-matmul ABI.
+# v0.8.0-macprovider.6 (mlx v0.32.5 sync): .5 with CMake pinned to core 4ff2db419
+# and fast SDPA passing window_size -1 (mlx v0.32.5 #4734 signature).
 # v0.8.0-macprovider.5 (engine-333): mlx-c v0.8.0 plus the fork's reference-
 # prefill and small-M route bindings (the v0.6.0-macprovider.4 commit 70f188c
 # ported); its CMake FetchContent pins MLX core cde15ff75. Prior:
@@ -89,8 +96,8 @@ SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # (07f7ae44) is a separate line on .2 and was never pinned; .4 is cut from
 # this revision at the campaign freeze.
 SPEC048_MLX_C_FORK = "https://github.com/Augustas11/mlx-c"
-SPEC048_MLX_C_TAG = "v0.8.0-macprovider.5"
-SPEC048_MLX_C_REVISION = "33d88bf44b974d73f978ba3ebee046fd941d13bf"
+SPEC048_MLX_C_TAG = "v0.8.0-macprovider.6"
+SPEC048_MLX_C_REVISION = "715780d6c3ff77fe688391207afc36fbca0ba100"
 SPEC048_MLX_C_UPSTREAM_BASE = "a26f2d584a14ec619ae8db9a09be03becd47598a"
 
 # #2028 audit carry: every reviewed revision and upstream base is a full

@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.33.0-macprovider.94 on 3.33.0-macprovider.92:
+        // 3.33.0-macprovider.92 with only the mlx-swift pin moved to be16992
+        // (0.33.0-macprovider.28 on MLX core 4ff2db419, the fork stack merged
+        // with upstream mlx v0.32.5 with small-M routes 1 and 2 unchanged,
+        // mlx-c 715780d); no model source changes.
         // Tag 3.33.0-macprovider.92 (#2505) on 3.33.0-macprovider.91: Inkling
         // 2 continuous batching: each batched row attends through the model's
         // own one-row attention over its paged cache, and batched one-token
@@ -302,10 +307,6 @@ let package = Package(
         // 3.32.3-macprovider.86 (bcffd492) with only the mlx-swift pin moved to
         // e7243b3, .26 plus the core dense qmm_t 64-row tile (core 6c2ac790c on
         // dd68f1d2d; mlx-c unchanged).
-        // mlx v0.32.5 fork sync: branch macprovider/v0.32.5 (0d9aaeeb) is
-        // 1ed7853d with only the mlx-swift pin moved to be16992 (core 4ff2db419:
-        // the fork stack merged with upstream mlx v0.32.5; mlx-c 715780d). Tags
-        // are cut at merge.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
             revision: "0d9aaeeba002d8e814cdf0661d74dfbf3ef5294d"

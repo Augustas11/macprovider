@@ -34,10 +34,10 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.92` | `1ed7853d27698b037d582aa2f00fc827ae4cca84` | `3.33.0` (`ca661dc6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.28` | `52ae025cbfac595328bd7fad23c8bce560bbe57c` | `0.33.0` (`7ede4fd6…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.18` | `cde15ff75e719a47677d7953657ee319ba50deee` | `v0.32.4` (`36969c09…`) |
-| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.5` | `33d88bf44b974d73f978ba3ebee046fd941d13bf` | `v0.8.0` (`a26f2d58…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.33.0-macprovider.94` | `0d9aaeeba002d8e814cdf0661d74dfbf3ef5294d` | `3.33.0` (`ca661dc6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.33.0-macprovider.29` | `be169924bed0b9956125eeab3c9c1eb8b9cb8f6b` | `0.33.0` (`7ede4fd6…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.5-macprovider.1` | `4ff2db41971adef65d6e817637f4b6dbdf719ef9` | `v0.32.5` (`cfc675e9…`) |
+| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.8.0-macprovider.6` | `715780d6c3ff77fe688391207afc36fbca0ba100` | `v0.8.0` (`a26f2d58…`) |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm, its manifest
@@ -46,6 +46,12 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-28 the LM row is `3.33.0-macprovider.94` (`0d9aaee`), on
+`3.33.0-macprovider.92`: 3.33.0-macprovider.92 with only the mlx-swift pin
+moved to be16992 (0.33.0-macprovider.29 on MLX core 4ff2db419, the fork stack
+merged with upstream mlx v0.32.5 with small-M routes 1 and 2 unchanged, mlx-c
+715780d); no model source changes. No Swift, core or C pin changes.
 
 As of 2026-11-26 the LM row is `3.33.0-macprovider.92` (`1ed7853`), on
 `3.33.0-macprovider.91` (#2505): Inkling 2 continuous batching: each batched
