@@ -58,6 +58,26 @@ lc() {
 
 say "WINDOW_0325 mode=$MODE run=$RUN_ID dry_run=$DRY log=$LOG"
 
+HAVE_LOCK=0
+PID=""
+# shellcheck disable=SC2329  # the EXIT trap
+finish() {
+  local rc=$?
+  if [ -n "$PID" ] && [ "$DRY" = 0 ] && "${SSH[@]}" "kill -0 $PID 2>/dev/null"; then
+    say "remote job still running at exit; stopping its process group $PID"
+    "${SSH[@]}" "kill -TERM -- -$PID 2>/dev/null; sleep 15; kill -KILL -- -$PID 2>/dev/null; pkill -KILL -f 'macprovider-cli[ ]serve --config '\$HOME'/lab-mlx-0325/' 2>/dev/null; true"
+  fi
+  say "KEEP_PAUSED=1: live, runner and miner untouched by this window"
+  if [ "$HAVE_LOCK" = 1 ]; then
+    lc env STUDIO_LANE=gpu bash "$LOCKSH" release "$OWNER" >> "$LOG" 2>&1
+    say "LOCK_RELEASED $OWNER"
+  fi
+  say "WINDOW_END rc=$rc"
+  say "HANDOVER_READY (live, runner, miner as the queue line left them; GPU lock released)"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM HUP
+
 # 0. Local: the shipped commit is the pushed branch tip with no local edits; fork revisions are pushed tips.
 git -C "$WT" fetch -q origin "$BRANCH" || { say "BLOCKER: git fetch origin $BRANCH failed"; exit 2; }
 COMMIT=$(git -C "$WT" rev-parse HEAD)
@@ -117,26 +137,9 @@ esac
 [ "$DRY" = 1 ] || [ "${disk:-0}" -ge 60 ] || { say "BLOCKER: only ${disk} GB free disk on the Studio (need 60)"; exit 3; }
 
 # 2. GPU lock, released in the trap.
-HAVE_LOCK=0
 lc env STUDIO_LANE=gpu bash "$LOCKSH" acquire "$OWNER" >> "$LOG" 2>&1 || { say "BLOCKER: gpu lock acquire failed"; exit 3; }
 HAVE_LOCK=1
 say "LOCK_ACQUIRED $OWNER"
-PID=""
-# shellcheck disable=SC2329  # the EXIT trap
-finish() {
-  local rc=$?
-  if [ -n "$PID" ] && [ "$DRY" = 0 ] && "${SSH[@]}" "kill -0 $PID 2>/dev/null"; then
-    say "remote job still running at exit; stopping its process group $PID"
-    "${SSH[@]}" "kill -TERM -- -$PID 2>/dev/null; sleep 15; kill -KILL -- -$PID 2>/dev/null; pkill -KILL -f 'macprovider-cli[ ]serve --config '\$HOME'/lab-mlx-0325/' 2>/dev/null; true"
-  fi
-  say "KEEP_PAUSED=1: live, runner and miner untouched by this window"
-  [ "$HAVE_LOCK" = 1 ] && lc env STUDIO_LANE=gpu bash "$LOCKSH" release "$OWNER" >> "$LOG" 2>&1
-  say "LOCK_RELEASED $OWNER"
-  say "WINDOW_END rc=$rc"
-  say "HANDOVER_READY (live, runner, miner as the queue line left them; GPU lock released)"
-}
-trap finish EXIT
-trap 'exit 130' INT TERM HUP
 
 # 3. Ship the pushed commit (and origin/main's phase3-binary for the gpu base build), then start the job.
 st "mkdir -p ~/lab-mlx-0325/logs ~/lab-mlx-0325/results $SRC_REMOTE && for d in ~/lab-mlx-0325/src-*; do [ \"\$d\" != \"$SRC_REMOTE\" ] && rm -rf \"\$d\"; done; true" \
