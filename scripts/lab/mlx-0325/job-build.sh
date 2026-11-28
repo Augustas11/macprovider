@@ -24,7 +24,8 @@ step() { local n="$1"; shift; echo "$(date +%T) STEP $n"
 fetch() {  # DIR URL REV
   [ -e "$1/.git" ] || git clone -q "$2" "$1" || return 1
   git -C "$1" fetch -q origin "$3" 2>/dev/null || git -C "$1" fetch -q origin || return 1
-  git -C "$1" checkout -q --detach "$3" && git -C "$1" clean -qfdx -e build && git -C "$1" rev-parse HEAD
+  git -C "$1" checkout -q -f --detach "$3" && git -C "$1" reset -q --hard && git -C "$1" clean -qfdx -e build -e .build \
+    && git -C "$1" rev-parse HEAD
 }
 core() {
   fetch "$L/mlx" https://github.com/Augustas11/mlx.git "$MLX_REV" || return 1
